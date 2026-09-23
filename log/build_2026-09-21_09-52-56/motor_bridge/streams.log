@@ -1,0 +1,33 @@
+[0.854s] Invoking command in '/home/tural/ROS2/src/motor_bridge': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/tural/ROS2/build/motor_bridge/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/tural/ROS2/install/motor_bridge/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/motor_bridge build --build-base /home/tural/ROS2/build/motor_bridge/build install --record /home/tural/ROS2/build/motor_bridge/install.log --install-scripts $base/lib/motor_bridge --single-version-externally-managed install_data
+[1.121s] running egg_info
+[1.140s] creating ../../build/motor_bridge/motor_bridge.egg-info
+[1.141s] writing ../../build/motor_bridge/motor_bridge.egg-info/PKG-INFO
+[1.141s] writing dependency_links to ../../build/motor_bridge/motor_bridge.egg-info/dependency_links.txt
+[1.141s] writing entry points to ../../build/motor_bridge/motor_bridge.egg-info/entry_points.txt
+[1.141s] writing requirements to ../../build/motor_bridge/motor_bridge.egg-info/requires.txt
+[1.141s] writing top-level names to ../../build/motor_bridge/motor_bridge.egg-info/top_level.txt
+[1.141s] writing manifest file '../../build/motor_bridge/motor_bridge.egg-info/SOURCES.txt'
+[1.183s] reading manifest file '../../build/motor_bridge/motor_bridge.egg-info/SOURCES.txt'
+[1.184s] writing manifest file '../../build/motor_bridge/motor_bridge.egg-info/SOURCES.txt'
+[1.184s] running build
+[1.184s] running build_py
+[1.184s] creating /home/tural/ROS2/build/motor_bridge/build/lib/motor_bridge
+[1.184s] copying motor_bridge/__init__.py -> /home/tural/ROS2/build/motor_bridge/build/lib/motor_bridge
+[1.184s] copying motor_bridge/serial_bridge_node.py -> /home/tural/ROS2/build/motor_bridge/build/lib/motor_bridge
+[1.184s] running install
+[1.188s] running install_lib
+[1.208s] creating /home/tural/ROS2/install/motor_bridge/lib/python3.12/site-packages/motor_bridge
+[1.208s] copying /home/tural/ROS2/build/motor_bridge/build/lib/motor_bridge/__init__.py -> /home/tural/ROS2/install/motor_bridge/lib/python3.12/site-packages/motor_bridge
+[1.209s] copying /home/tural/ROS2/build/motor_bridge/build/lib/motor_bridge/serial_bridge_node.py -> /home/tural/ROS2/install/motor_bridge/lib/python3.12/site-packages/motor_bridge
+[1.209s] byte-compiling /home/tural/ROS2/install/motor_bridge/lib/python3.12/site-packages/motor_bridge/__init__.py to __init__.cpython-312.pyc
+[1.209s] byte-compiling /home/tural/ROS2/install/motor_bridge/lib/python3.12/site-packages/motor_bridge/serial_bridge_node.py to serial_bridge_node.cpython-312.pyc
+[1.211s] running install_data
+[1.211s] creating /home/tural/ROS2/install/motor_bridge/share/ament_index/resource_index/packages
+[1.211s] copying resource/motor_bridge -> /home/tural/ROS2/install/motor_bridge/share/ament_index/resource_index/packages
+[1.212s] copying package.xml -> /home/tural/ROS2/install/motor_bridge/share/motor_bridge
+[1.212s] running install_egg_info
+[1.232s] Copying ../../build/motor_bridge/motor_bridge.egg-info to /home/tural/ROS2/install/motor_bridge/lib/python3.12/site-packages/motor_bridge-0.0.0-py3.12.egg-info
+[1.232s] running install_scripts
+[1.273s] Installing motor_bridge_node script to /home/tural/ROS2/install/motor_bridge/lib/motor_bridge
+[1.273s] writing list of installed files to '/home/tural/ROS2/build/motor_bridge/install.log'
+[1.292s] Invoked command in '/home/tural/ROS2/src/motor_bridge' returned '0': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/tural/ROS2/build/motor_bridge/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/tural/ROS2/install/motor_bridge/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/motor_bridge build --build-base /home/tural/ROS2/build/motor_bridge/build install --record /home/tural/ROS2/build/motor_bridge/install.log --install-scripts $base/lib/motor_bridge --single-version-externally-managed install_data

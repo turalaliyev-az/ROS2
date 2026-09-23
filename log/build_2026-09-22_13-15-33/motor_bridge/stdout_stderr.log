@@ -1,0 +1,23 @@
+running egg_info
+writing ../../build/motor_bridge/motor_bridge.egg-info/PKG-INFO
+writing dependency_links to ../../build/motor_bridge/motor_bridge.egg-info/dependency_links.txt
+writing entry points to ../../build/motor_bridge/motor_bridge.egg-info/entry_points.txt
+writing requirements to ../../build/motor_bridge/motor_bridge.egg-info/requires.txt
+writing top-level names to ../../build/motor_bridge/motor_bridge.egg-info/top_level.txt
+reading manifest file '../../build/motor_bridge/motor_bridge.egg-info/SOURCES.txt'
+writing manifest file '../../build/motor_bridge/motor_bridge.egg-info/SOURCES.txt'
+running build
+running build_py
+copying motor_bridge/__init__.py -> /home/tural/ROS2/build/motor_bridge/build/lib/motor_bridge
+copying motor_bridge/serial_bridge_node.py -> /home/tural/ROS2/build/motor_bridge/build/lib/motor_bridge
+running install
+running install_lib
+running install_data
+copying resource/motor_bridge -> /home/tural/ROS2/install/motor_bridge/share/ament_index/resource_index/packages
+copying package.xml -> /home/tural/ROS2/install/motor_bridge/share/motor_bridge
+running install_egg_info
+removing '/home/tural/ROS2/install/motor_bridge/lib/python3.12/site-packages/motor_bridge-0.0.0-py3.12.egg-info' (and everything under it)
+Copying ../../build/motor_bridge/motor_bridge.egg-info to /home/tural/ROS2/install/motor_bridge/lib/python3.12/site-packages/motor_bridge-0.0.0-py3.12.egg-info
+running install_scripts
+Installing motor_bridge_node script to /home/tural/ROS2/install/motor_bridge/lib/motor_bridge
+writing list of installed files to '/home/tural/ROS2/build/motor_bridge/install.log'
