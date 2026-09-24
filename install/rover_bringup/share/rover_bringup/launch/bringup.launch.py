@@ -39,6 +39,14 @@ def generate_launch_description():
         name='motor_bridge_node',
         output='screen',
         parameters=[{
+            # Stable udev symlink (see 99-rover-usb.rules), not the raw
+            # ttyACMn name -- that number reshuffles across reconnects
+            # (seen ttyACM0/1 both used for the same physical ESP32 in
+            # one session), breaking this hardcoded path each time. Falls
+            # back to /dev/ttyACM1 (current port as of 2026-09-23 16:xx)
+            # only until the udev rule is actually installed -- switch
+            # this back to /dev/rover_esp32 once `ls /dev/rover_esp32`
+            # succeeds.
             'serial_port': '/dev/ttyACM0',
             'baud_rate': 115200,
             'wheel_diameter_m': 0.09022,
@@ -74,6 +82,8 @@ def generate_launch_description():
             'product_name': 'LDLiDAR_LD19',
             'topic_name': 'scan',
             'frame_id': 'laser_frame',
+            # Same temporary fallback as serial_port above -- switch to
+            # /dev/rover_lidar once the udev rule is installed.
             'port_name': '/dev/ttyUSB0',
             'port_baudrate': 230400,
             'laser_scan_dir': True,

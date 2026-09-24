@@ -64,7 +64,13 @@ bt_navigator:
 
 controller_server:
   ros__parameters:
-    controller_frequency: 20.0
+    # Reduced from 20.0 (2026-09-23): measured control loop actually
+    # running at 4-8 Hz on this hardware with MPPI's default batch_size,
+    # causing "Failed to make progress" -- the loop was too slow to ever
+    # drive the robot within the progress checker's time window, which
+    # looked identical to a stuck/misconfigured controller until CPU load
+    # was checked directly (nav2_container pegged at 60-83% of one core).
+    controller_frequency: 10.0
     costmap_update_timeout: 0.30
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
@@ -72,6 +78,15 @@ controller_server:
     failure_tolerance: 0.3
     progress_checker_plugins: ["progress_checker"]
     goal_checker_plugins: ["general_goal_checker"]
+    # Temporarily pointed at TestRPP (2026-09-23) to isolate whether MPPI
+    # itself is the problem: with a clean costmap, good localization, and
+    # controller_frequency now achievable, MPPI still output near-zero
+    # cmd_vel on both a goal needing ~120deg turn and one needing none.
+    # Swapping to a simple, well-known controller checks whether the whole
+    # pipeline downstream of controller_server (velocity_smoother,
+    # collision_monitor, motor_bridge) can drive the robot at all via
+    # Nav2, independent of MPPI's own critic tuning. Revert to FollowPath
+    # once this is resolved.
     controller_plugins: ["FollowPath"]
     use_realtime_priority: false
 
@@ -92,10 +107,31 @@ controller_server:
     # changes in the first place). Revisit once max_wheel_speed_mps is
     # properly calibrated and a few clean autonomous runs are done.
     FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.1
+      lookahead_dist: 0.4
+      min_lookahead_dist: 0.3
+      max_lookahead_dist: 0.6
+      max_angular_accel: 1.0
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+      use_regulated_linear_velocity_scaling: true
+      use_cost_regulated_linear_velocity_scaling: false
+      regulated_linear_scaling_min_radius: 0.5
+      regulated_linear_scaling_min_speed: 0.05
+      use_rotate_to_heading: true
+      rotate_to_heading_angular_vel: 0.5
+      max_robot_pose_search_dist: 5.0
+    FollowPath_MPPI_disabled_for_test:
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 56
-      model_dt: 0.05
-      batch_size: 1000
+      # time_steps/batch_size reduced from 56/1000 alongside
+      # controller_frequency (see note above) -- same CPU-budget fix.
+      time_steps: 32
+      # Must be >= the controller period (1/controller_frequency = 0.1s)
+      # or MPPI refuses to configure ("Controller period more then model
+      # dt"). Raised from 0.05 alongside controller_frequency's drop to
+      # 10.0 above.
+      model_dt: 0.1
+      batch_size: 400
       ax_max: 0.3
       ax_min: -0.3
       ay_max: 0.3
@@ -296,7 +332,7 @@ map_saver:
 
 planner_server:
   ros__parameters:
-    expected_planner_frequency: 20.0
+    expected_planner_frequency: 10.0
     planner_plugins: ["GridBased"]
     costmap_update_timeout: 1.0
     GridBased:
