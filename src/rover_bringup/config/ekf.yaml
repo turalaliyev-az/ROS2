@@ -10,14 +10,15 @@ ekf_filter_node:
     base_link_frame: base_footprint
     world_frame: odom
 
-    # Wheel encoders: trustworthy for x/y translation and forward speed,
-    # but NOT for yaw -- a hand-spun or slipping wheel reports rotation
-    # that never physically happened (see 2026-09-21 discussion). Yaw and
-    # vyaw are left to the IMU gyro below instead.
+    # Wheel encoders: forward speed, plus vy (always ~0 for a diff drive) as
+    # a no-sideslip constraint. Their x/y pose is just the integral of that
+    # same speed, so fusing it too would count the same data twice. Yaw is
+    # left to the IMU gyro -- a slipping wheel reports rotation that never
+    # happened.
     odom0: wheel_odom
-    odom0_config: [true,  true,  false,
+    odom0_config: [false, false, false,
                    false, false, false,
-                   true,  false, false,
+                   true,  true,  false,
                    false, false, false,
                    false, false, false]
     odom0_differential: false

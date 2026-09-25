@@ -1,3 +1,4 @@
+import glob
 import os
 
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
@@ -10,17 +11,36 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 
+def _resolve_port(udev_link, by_id_glob, fallback):
+    """Prefer a device name that survives re-plugging over the kernel's ttyACMn/ttyUSBn."""
+    if os.path.exists(udev_link):
+        return udev_link
+    matches = sorted(glob.glob(os.path.join('/dev/serial/by-id', by_id_glob)))
+    return matches[0] if matches else fallback
+
+
 def generate_launch_description():
     rover_bringup_share = get_package_share_directory('rover_bringup')
     xacro_path = os.path.join(rover_bringup_share, 'urdf', 'rover.urdf.xacro')
 
     use_lidar = LaunchConfiguration('use_lidar')
     use_camera = LaunchConfiguration('use_camera')
+    esp32_port = LaunchConfiguration('esp32_port')
+    lidar_port = LaunchConfiguration('lidar_port')
 
     declare_use_lidar = DeclareLaunchArgument(
         'use_lidar', default_value='true')
     declare_use_camera = DeclareLaunchArgument(
         'use_camera', default_value='true')
+    # /dev/serial/by-id names come from the default udev rules (no sudo
+    # needed) and stay the same across reconnects, unlike ttyACM0/ttyACM1.
+    declare_esp32_port = DeclareLaunchArgument(
+        'esp32_port',
+        default_value=_resolve_port(
+            '/dev/rover_esp32', '*USB_Single_Serial_5C4E000865*', '/dev/ttyACM0'))
+    declare_lidar_port = DeclareLaunchArgument(
+        'lidar_port',
+        default_value=_resolve_port('/dev/rover_lidar', '*CP2102*', '/dev/ttyUSB0'))
 
     robot_description = ParameterValue(
         Command(['xacro ', xacro_path]), value_type=str)
@@ -38,27 +58,25 @@ def generate_launch_description():
         executable='motor_bridge_node',
         name='motor_bridge_node',
         output='screen',
+        respawn=True,
+        respawn_delay=3.0,
         parameters=[{
-            # Stable udev symlink (see 99-rover-usb.rules), not the raw
-            # ttyACMn name -- that number reshuffles across reconnects
-            # (seen ttyACM0/1 both used for the same physical ESP32 in
-            # one session), breaking this hardcoded path each time. Falls
-            # back to /dev/ttyACM1 (current port as of 2026-09-23 16:xx)
-            # only until the udev rule is actually installed -- switch
-            # this back to /dev/rover_esp32 once `ls /dev/rover_esp32`
-            # succeeds.
-            'serial_port': '/dev/ttyACM0',
+            'serial_port': esp32_port,
             'baud_rate': 115200,
             'wheel_diameter_m': 0.09022,
             'wheel_separation_m': 0.44,
             'ticks_per_rev_left': 74,
             'ticks_per_rev_right': 73,
-            'max_pwm': 500,
-            'max_wheel_speed_mps': 0.5,
-            # ekf_node (see below) now owns the odom->base_footprint TF
-            # and publishes the fused result as /odom; this node's own
-            # wheel-only estimate is renamed out of the way so it feeds
-            # the filter as an input instead of colliding with it.
+            # Hard cap per wheel, above anything Nav2 asks for (0.15 m/s +
+            # 0.5 rad/s turn = 0.26 m/s on the outer wheel); mainly limits
+            # teleop, whose default speed is 0.5 m/s.
+            'max_wheel_speed_mps': 0.3,
+            'max_linear_accel_mps2': 0.3,
+            'max_linear_decel_mps2': 1.0,
+            'max_angular_accel_rps2': 1.0,
+            'max_angular_decel_rps2': 2.0,
+            # ekf_node owns odom->base_footprint and publishes the fused /odom;
+            # this wheel-only estimate feeds it as an input.
             'publish_tf': False,
         }],
         remappings=[('odom', 'wheel_odom')],
@@ -78,27 +96,23 @@ def generate_launch_description():
         executable='ldlidar_stl_ros2_node',
         name='ldlidar_node',
         output='screen',
+        respawn=True,
+        respawn_delay=3.0,
         parameters=[{
             'product_name': 'LDLiDAR_LD19',
             'topic_name': 'scan',
             'frame_id': 'laser_frame',
-            # Same temporary fallback as serial_port above -- switch to
-            # /dev/rover_lidar once the udev rule is installed.
-            'port_name': '/dev/ttyUSB0',
+            'port_name': lidar_port,
             'port_baudrate': 230400,
             'laser_scan_dir': True,
-            # Robot's own mount/bracket sits in the lidar's scan plane at a
-            # fixed bearing -- confirmed via 59 scans (6s), 42/59 close hits
-            # all landing at 170-180 deg, ~0.46m, essentially zero variance.
-            # No real obstacle: with nothing physically near the robot the
-            # reading stayed identical, so it's self-detection, not clutter.
-            # Cropped narrowly (165-185, only 20 deg) rather than reusing
-            # the old 90 deg placeholder -- that width isn't needed here and
-            # would blind a much wider rear arc than the mount actually
-            # occupies.
+            # Something mounted on the robot shows up at a fixed ~0.46 m
+            # directly behind (published /scan angles 170-180 deg, 42 of 59
+            # scans at rest). The crop compares the lidar's native clockwise
+            # angle, and laser_scan_dir mirrors it (published = 360 - native),
+            # so native 175-195 is what masks published 165-185.
             'enable_angle_crop_func': True,
-            'angle_crop_min': 165.0,
-            'angle_crop_max': 185.0,
+            'angle_crop_min': 175.0,
+            'angle_crop_max': 195.0,
         }],
         condition=IfCondition(use_lidar),
     )
@@ -118,7 +132,9 @@ def generate_launch_description():
             'scan_height': 40,
             'range_min': 0.3,
             'range_max': 8.0,
-            'output_frame': 'camera_depth_optical_frame',
+            # A LaserScan needs a z-up frame; the optical frame (z forward)
+            # turns the scan plane vertical.
+            'output_frame': 'camera_depth_frame',
         }],
         remappings=[
             ('depth', '/camera/camera/depth/image_rect_raw'),
@@ -131,6 +147,8 @@ def generate_launch_description():
     ld = LaunchDescription()
     ld.add_action(declare_use_lidar)
     ld.add_action(declare_use_camera)
+    ld.add_action(declare_esp32_port)
+    ld.add_action(declare_lidar_port)
     ld.add_action(robot_state_publisher_node)
     ld.add_action(motor_bridge_node)
     ld.add_action(ekf_node)

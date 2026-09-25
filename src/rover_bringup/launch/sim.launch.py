@@ -16,7 +16,7 @@ def generate_launch_description():
     loopback_sim_share = get_package_share_directory('nav2_loopback_sim')
 
     xacro_path = os.path.join(rover_bringup_share, 'urdf', 'rover.urdf.xacro')
-    default_map = os.path.join(rover_bringup_share, 'maps', 'restaurant_map.yaml')
+    default_map = os.path.join(rover_bringup_share, 'maps', 'restaurant_map_v2.yaml')
     default_params = os.path.join(rover_bringup_share, 'config', 'nav2_params.yaml')
     rviz_config = os.path.join(rover_bringup_share, 'rviz', 'nav.rviz')
 

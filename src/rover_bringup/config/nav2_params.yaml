@@ -78,34 +78,28 @@ controller_server:
     failure_tolerance: 0.3
     progress_checker_plugins: ["progress_checker"]
     goal_checker_plugins: ["general_goal_checker"]
-    # Temporarily pointed at TestRPP (2026-09-23) to isolate whether MPPI
-    # itself is the problem: with a clean costmap, good localization, and
-    # controller_frequency now achievable, MPPI still output near-zero
-    # cmd_vel on both a goal needing ~120deg turn and one needing none.
-    # Swapping to a simple, well-known controller checks whether the whole
-    # pipeline downstream of controller_server (velocity_smoother,
-    # collision_monitor, motor_bridge) can drive the robot at all via
-    # Nav2, independent of MPPI's own critic tuning. Revert to FollowPath
-    # once this is resolved.
+    # Regulated Pure Pursuit rather than MPPI: MPPI couldn't hold its control
+    # rate on this laptop (4-8 Hz of the requested 20). The MPPI config is in
+    # git history if the robot moves to faster hardware.
     controller_plugins: ["FollowPath"]
     use_realtime_priority: false
 
+    # Rotation counts as progress: turning ~180 deg at 0.5 rad/s and then
+    # covering 0.3 m at 0.1 m/s takes longer than 10 s, and the translation-
+    # only SimpleProgressChecker aborted every goal that started with a
+    # turn-around.
     progress_checker:
-      plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.3
-      movement_time_allowance: 10.0
+      plugin: "nav2_controller::PoseProgressChecker"
+      required_movement_radius: 0.2
+      required_movement_angle: 0.5
+      movement_time_allowance: 15.0
     general_goal_checker:
       stateful: True
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.15
       yaw_goal_tolerance: 0.25
-    # Kept deliberately low for the first autonomous runs (2026-09-22):
-    # low top speed AND low acceleration limits, so the real motors never
-    # get a sudden large PWM step that could spin the wheels against the
-    # real floor (open-loop PWM control -- there is no slip detection
-    # anywhere in this stack, so the only defense is not commanding sharp
-    # changes in the first place). Revisit once max_wheel_speed_mps is
-    # properly calibrated and a few clean autonomous runs are done.
+    # Deliberately slow (restaurant floor, possible cargo). Speed limits here
+    # must stay within velocity_smoother's max_velocity below.
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 0.1
@@ -121,98 +115,6 @@ controller_server:
       use_rotate_to_heading: true
       rotate_to_heading_angular_vel: 0.5
       max_robot_pose_search_dist: 5.0
-    FollowPath_MPPI_disabled_for_test:
-      plugin: "nav2_mppi_controller::MPPIController"
-      # time_steps/batch_size reduced from 56/1000 alongside
-      # controller_frequency (see note above) -- same CPU-budget fix.
-      time_steps: 32
-      # Must be >= the controller period (1/controller_frequency = 0.1s)
-      # or MPPI refuses to configure ("Controller period more then model
-      # dt"). Raised from 0.05 alongside controller_frequency's drop to
-      # 10.0 above.
-      model_dt: 0.1
-      batch_size: 400
-      ax_max: 0.3
-      ax_min: -0.3
-      ay_max: 0.3
-      ay_min: -0.3
-      az_max: 0.5
-      vx_std: 0.1
-      vy_std: 0.0
-      wz_std: 0.15
-      vx_max: 0.15
-      vx_min: -0.1
-      vy_max: 0.0
-      wz_max: 0.5
-      iteration_count: 1
-      prune_distance: 1.7
-      transform_tolerance: 0.1
-      temperature: 0.3
-      gamma: 0.015
-      motion_model: "DiffDrive"
-      visualize: false
-      regenerate_noises: true
-      TrajectoryVisualizer:
-        trajectory_step: 5
-        time_step: 3
-      AckermannConstraints:
-        min_turning_r: 0.2
-      critics: [
-        "ConstraintCritic", "CostCritic", "GoalCritic",
-        "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic",
-        "PathAngleCritic", "PreferForwardCritic"]
-      ConstraintCritic:
-        enabled: true
-        cost_power: 1
-        cost_weight: 4.0
-      GoalCritic:
-        enabled: true
-        cost_power: 1
-        cost_weight: 5.0
-        threshold_to_consider: 1.4
-      GoalAngleCritic:
-        enabled: true
-        cost_power: 1
-        cost_weight: 3.0
-        threshold_to_consider: 0.5
-      PreferForwardCritic:
-        enabled: true
-        cost_power: 1
-        cost_weight: 5.0
-        threshold_to_consider: 0.5
-      CostCritic:
-        enabled: true
-        cost_power: 1
-        cost_weight: 3.81
-        near_collision_cost: 253
-        critical_cost: 300.0
-        consider_footprint: true
-        collision_cost: 1000000.0
-        near_goal_distance: 1.0
-        trajectory_point_step: 2
-      PathAlignCritic:
-        enabled: true
-        cost_power: 1
-        cost_weight: 14.0
-        max_path_occupancy_ratio: 0.05
-        trajectory_point_step: 4
-        threshold_to_consider: 0.5
-        offset_from_furthest: 20
-        use_path_orientations: false
-      PathFollowCritic:
-        enabled: true
-        cost_power: 1
-        cost_weight: 5.0
-        offset_from_furthest: 5
-        threshold_to_consider: 1.4
-      PathAngleCritic:
-        enabled: true
-        cost_power: 1
-        cost_weight: 2.0
-        offset_from_furthest: 4
-        threshold_to_consider: 0.5
-        max_angle_to_furthest: 1.0
-        mode: 0
 
 # Footprint measured 2026-09-21: 45cm x 42cm chassis (half-extents
 # 0.225 x 0.21). Circumscribed radius ~0.308m, so inflation_radius is set
@@ -240,14 +142,7 @@ local_costmap:
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
-        # camera_cloud temporarily dropped here (2026-09-23) while
-        # diagnosing MPPI producing near-zero cmd_vel with an open, 3m+
-        # clear real environment: local costmap showed a large solid
-        # lethal block a few cells from the robot that doesn't match
-        # reality. Testing whether camera_cloud (floor mis-marked as an
-        # obstacle from camera pitch, despite the min_obstacle_height
-        # filter below) is the source before deciding a permanent fix.
-        observation_sources: scan
+        observation_sources: scan camera_cloud
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -258,24 +153,21 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 4.0
           obstacle_min_range: 0.0
-        # RealSense point cloud: catches obstacles (table edges, chair/table
-        # legs) outside the lidar's fixed scan plane. min_obstacle_height is
-        # kept above 0 to avoid the floor itself being marked as an
-        # obstacle from camera pitch/noise.
+        # RealSense point cloud: table edges and chair/table legs outside the
+        # lidar's scan plane. The URDF assumes a perfectly level camera, so a
+        # small real tilt makes the floor appear to rise with distance: the
+        # 6 cm height floor and 2 m range keep floor points from being marked.
         camera_cloud:
           topic: /camera/camera/depth/color/points
           data_type: "PointCloud2"
-          min_obstacle_height: 0.02
+          min_obstacle_height: 0.06
           max_obstacle_height: 1.5
           clearing: True
           marking: True
-          raytrace_max_range: 4.0
+          raytrace_max_range: 2.5
           raytrace_min_range: 0.0
-          obstacle_max_range: 3.5
+          obstacle_max_range: 2.0
           obstacle_min_range: 0.0
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_subscribe_transient_local: True
       always_send_full_costmap: True
 
 global_costmap:
@@ -306,13 +198,13 @@ global_costmap:
         camera_cloud:
           topic: /camera/camera/depth/color/points
           data_type: "PointCloud2"
-          min_obstacle_height: 0.02
+          min_obstacle_height: 0.06
           max_obstacle_height: 1.5
           clearing: True
           marking: True
-          raytrace_max_range: 4.0
+          raytrace_max_range: 2.5
           raytrace_min_range: 0.0
-          obstacle_max_range: 3.5
+          obstacle_max_range: 2.0
           obstacle_min_range: 0.0
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
