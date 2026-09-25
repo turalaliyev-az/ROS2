@@ -27,6 +27,7 @@ def generate_launch_description():
     use_camera = LaunchConfiguration('use_camera')
     esp32_port = LaunchConfiguration('esp32_port')
     lidar_port = LaunchConfiguration('lidar_port')
+    lidar_rear_crop = LaunchConfiguration('lidar_rear_crop')
 
     declare_use_lidar = DeclareLaunchArgument(
         'use_lidar', default_value='true')
@@ -41,6 +42,9 @@ def generate_launch_description():
     declare_lidar_port = DeclareLaunchArgument(
         'lidar_port',
         default_value=_resolve_port('/dev/rover_lidar', '*CP2102*', '/dev/ttyUSB0'))
+    declare_lidar_rear_crop = DeclareLaunchArgument(
+        'lidar_rear_crop', default_value='true',
+        description='Mask the 20 deg behind the lidar (only needed while something sits there)')
 
     robot_description = ParameterValue(
         Command(['xacro ', xacro_path]), value_type=str)
@@ -67,10 +71,10 @@ def generate_launch_description():
             'wheel_separation_m': 0.44,
             'ticks_per_rev_left': 74,
             'ticks_per_rev_right': 73,
-            # Hard cap per wheel, above anything Nav2 asks for (0.15 m/s +
-            # 0.5 rad/s turn = 0.26 m/s on the outer wheel); mainly limits
+            # Hard cap per wheel, above anything Nav2 asks for (0.2 m/s +
+            # 0.5 rad/s turn = 0.31 m/s on the outer wheel); mainly limits
             # teleop, whose default speed is 0.5 m/s.
-            'max_wheel_speed_mps': 0.3,
+            'max_wheel_speed_mps': 0.35,
             'max_linear_accel_mps2': 0.3,
             'max_linear_decel_mps2': 1.0,
             'max_angular_accel_rps2': 1.0,
@@ -105,12 +109,13 @@ def generate_launch_description():
             'port_name': lidar_port,
             'port_baudrate': 230400,
             'laser_scan_dir': True,
-            # Something mounted on the robot shows up at a fixed ~0.46 m
-            # directly behind (published /scan angles 170-180 deg, 42 of 59
-            # scans at rest). The crop compares the lidar's native clockwise
-            # angle, and laser_scan_dir mirrors it (published = 360 - native),
-            # so native 175-195 is what masks published 165-185.
-            'enable_angle_crop_func': True,
+            # Something carried on the robot (probably the laptop) showed up at
+            # a fixed ~0.46 m directly behind (published /scan 170-180 deg).
+            # Turn this off when nothing sits there, so the rear isn't blind.
+            # The crop compares the lidar's native clockwise angle, and
+            # laser_scan_dir mirrors it (published = 360 - native), so native
+            # 175-195 is what masks published 165-185.
+            'enable_angle_crop_func': lidar_rear_crop,
             'angle_crop_min': 175.0,
             'angle_crop_max': 195.0,
         }],
@@ -149,6 +154,7 @@ def generate_launch_description():
     ld.add_action(declare_use_camera)
     ld.add_action(declare_esp32_port)
     ld.add_action(declare_lidar_port)
+    ld.add_action(declare_lidar_rear_crop)
     ld.add_action(robot_state_publisher_node)
     ld.add_action(motor_bridge_node)
     ld.add_action(ekf_node)

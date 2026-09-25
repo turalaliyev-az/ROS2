@@ -18,6 +18,10 @@ Visualization Manager:
       Topic:
         Value: /initialpose
     - Class: nav2_rviz_plugins/GoalTool
+    - Class: rviz_default_plugins/PublishPoint
+      Topic:
+        Value: /clicked_point
+      Single click: true
   Displays:
     - Class: rviz_default_plugins/Grid
       Name: Grid

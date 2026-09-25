@@ -102,26 +102,36 @@ controller_server:
     # must stay within velocity_smoother's max_velocity below.
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.1
+      # Cruise speed in open space; the regulation below slows it in turns,
+      # next to obstacles and on the final approach.
+      desired_linear_vel: 0.2
       lookahead_dist: 0.4
       min_lookahead_dist: 0.3
       max_lookahead_dist: 0.6
       max_angular_accel: 1.0
-      max_allowed_time_to_collision_up_to_carrot: 1.0
+      # Look 2 s ahead (0.4 m at cruise) for collisions instead of 1 s: an
+      # obstacle found this early leaves time to stop and replan around it.
+      max_allowed_time_to_collision_up_to_carrot: 2.0
       use_regulated_linear_velocity_scaling: true
-      use_cost_regulated_linear_velocity_scaling: false
+      use_cost_regulated_linear_velocity_scaling: true
+      cost_scaling_dist: 0.6
+      cost_scaling_gain: 1.0
       regulated_linear_scaling_min_radius: 0.5
-      regulated_linear_scaling_min_speed: 0.05
+      # The loaded wheels can't hold much under ~0.07 m/s (they stick-slip),
+      # so every "slow down" floor stays at 0.08 instead of Nav2's 0.05.
+      regulated_linear_scaling_min_speed: 0.08
+      min_approach_linear_velocity: 0.08
+      approach_velocity_scaling_dist: 0.4
       use_rotate_to_heading: true
       rotate_to_heading_angular_vel: 0.5
       max_robot_pose_search_dist: 5.0
 
 # Footprint measured 2026-09-21: 45cm x 42cm chassis (half-extents
-# 0.225 x 0.21). Circumscribed radius ~0.308m, so inflation_radius is set
-# just above that -- large enough for nav2's fast footprint-check
-# optimization, small enough to leave real furniture gaps navigable
-# (0.40m was measured too large: it trapped the robot within its own
-# starting pocket, unable to plan to any point more than ~0.3m away).
+# 0.225 x 0.21, circumscribed radius ~0.31 m). Only cells within the
+# inscribed radius (0.21 m) of an obstacle block a path; inflation beyond
+# that just adds cost, so a wide, gently decaying inflation (0.55 m, factor
+# 3) makes the planner run through the middle of gaps and keep ~20-30 cm
+# from furniture where there's room, without closing gaps that fit the robot.
 local_costmap:
   local_costmap:
     ros__parameters:
@@ -137,8 +147,8 @@ local_costmap:
       plugins: ["obstacle_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 5.0
-        inflation_radius: 0.34
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -211,8 +221,8 @@ global_costmap:
         map_subscribe_transient_local: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 5.0
-        inflation_radius: 0.34
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
       always_send_full_costmap: True
 
 map_saver:
@@ -309,10 +319,11 @@ velocity_smoother:
     stamp_smoothed_velocity_with_smoothing_time: False
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.15, 0.0, 0.5]
+    max_velocity: [0.2, 0.0, 0.5]
     min_velocity: [-0.1, 0.0, -0.5]
+    # Gentle speed-up (no wheel slip), firmer slow-down for obstacles.
     max_accel: [0.3, 0.0, 0.5]
-    max_decel: [-0.3, 0.0, -0.5]
+    max_decel: [-0.5, 0.0, -0.8]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
@@ -334,7 +345,7 @@ collision_monitor:
       type: "polygon"
       action_type: "approach"
       footprint_topic: "/local_costmap/published_footprint"
-      time_before_collision: 1.2
+      time_before_collision: 1.5
       simulation_time_step: 0.1
       min_points: 6
       visualize: False
