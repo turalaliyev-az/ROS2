@@ -1,1 +1,0 @@
-/home/tural/ROS2/build/ldlidar_stl_ros2/ament_cmake_core/ldlidar_stl_ros2Config.cmake

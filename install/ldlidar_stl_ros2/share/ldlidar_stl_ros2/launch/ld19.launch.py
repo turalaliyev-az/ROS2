@@ -1,1 +1,0 @@
-/home/tural/ROS2/src/ldlidar_stl_ros2/launch/ld19.launch.py

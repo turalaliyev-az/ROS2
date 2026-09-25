@@ -1,2 +1,0 @@
-Invoking command in '/home/tural/ROS2/build/ldlidar_stl_ros2': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake /home/tural/ROS2/src/ldlidar_stl_ros2 -DCMAKE_INSTALL_PREFIX=/home/tural/ROS2/install/ldlidar_stl_ros2
-Invoked command in '/home/tural/ROS2/build/ldlidar_stl_ros2' returned '1': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com /usr/bin/cmake /home/tural/ROS2/src/ldlidar_stl_ros2 -DCMAKE_INSTALL_PREFIX=/home/tural/ROS2/install/ldlidar_stl_ros2

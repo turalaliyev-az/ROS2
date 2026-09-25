@@ -1,2 +1,0 @@
-[console_scripts]
-motor_bridge_node = motor_bridge.serial_bridge_node:main
