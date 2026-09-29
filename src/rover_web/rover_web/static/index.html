@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="az">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#0b1220">
+<title>Rover idarə paneli</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="status">
+    <span id="modePill" class="pill">Bağlanır…</span>
+    <span class="sensors">
+      <span class="dot" id="sEsp" title="Motor (ESP32)"></span><small>Motor</small>
+      <span class="dot" id="sLidar" title="Lidar"></span><small>Lidar</small>
+      <span class="dot" id="sCam" title="Kamera"></span><small>Kamera</small>
+    </span>
+  </div>
+  <div class="topright">
+    <span id="battery" class="battery hidden" title="Kompüterin batareyası">
+      <span class="batt-body"><span id="battFill" class="batt-fill"></span></span>
+      <span id="battText"></span>
+    </span>
+    <button id="homeBtn" class="iconbtn" title="Evə qayıt" aria-label="Evə qayıt">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path d="M3 11.5 12 4l9 7.5M5.5 9.5V20h5v-6h3v6h5V9.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>
+    </button>
+    <button id="stopBtn" class="stop">STOP</button>
+  </div>
+</header>
+
+<div id="offline" class="banner hidden">Robotla əlaqə yoxdur — yenidən qoşulur…</div>
+<div id="locWarn" class="banner warn hidden">
+  Robotun mövqeyi dəqiq deyil. <button class="link" data-goto-tab="map" data-tool="pose">Xəritədə təyin et</button>
+</div>
+<div id="navBar" class="navbar hidden">
+  <span id="navText"></span>
+  <button id="navCancel" class="small danger">Ləğv et</button>
+</div>
+
+<main>
+  <!-- ================= MAP ================= -->
+  <section id="tab-map" class="tab active">
+    <div class="tools" id="mapTools">
+      <button data-tool="view" class="on">Bax</button>
+      <button data-tool="goto">Get</button>
+      <button data-tool="route">Marşrut</button>
+      <button data-tool="table">Masa</button>
+      <button data-tool="home">Ev</button>
+      <button data-tool="pose">Mövqe</button>
+    </div>
+    <div class="mapwrap">
+      <canvas id="map"></canvas>
+      <div id="mapHint" class="hint"></div>
+      <div class="mapbtns">
+        <button id="followBtn" class="small on" title="Robotu izlə">◎</button>
+        <button id="scanBtn" class="small on" title="Lidar və kamera nöqtələri">
+          <svg viewBox="0 0 24 24" width="20" height="20"><circle cx="12" cy="12" r="2.2" fill="currentColor"/><path d="M7.5 7.5a6.4 6.4 0 0 0 0 9M16.5 7.5a6.4 6.4 0 0 1 0 9M4.6 4.6a10.5 10.5 0 0 0 0 14.8M19.4 4.6a10.5 10.5 0 0 1 0 14.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+        <button id="zoomIn" class="small">+</button>
+        <button id="zoomOut" class="small">−</button>
+      </div>
+      <div id="legend" class="legend">
+        <span><i class="lg lidar"></i>Lidar</span>
+        <span><i class="lg camera"></i>Kamera</span>
+      </div>
+    </div>
+    <div id="routeBar" class="routebar hidden">
+      <span id="routeCount">0 nöqtə</span>
+      <label>Dövrə <input id="routeLoops" type="number" min="0" max="99" value="0"></label>
+      <button id="routeClear" class="small">Təmizlə</button>
+      <button id="routeStart" class="small primary">Başlat</button>
+    </div>
+  </section>
+
+  <!-- ================= MANUAL ================= -->
+  <section id="tab-manual" class="tab">
+    <div class="camcard">
+      <div class="seg" id="camSeg">
+        <button data-cam="color" class="on">Kamera</button>
+        <button data-cam="depth">Dərinlik</button>
+        <button data-cam="off">Söndür</button>
+      </div>
+      <div class="cambox">
+        <img id="camImg" alt="">
+        <div id="camMsg" class="cammsg">Görüntü yüklənir…</div>
+        <div id="depthScale" class="depthscale hidden"><span>yaxın</span><span>6 m+</span></div>
+      </div>
+    </div>
+    <div class="drive">
+      <div id="joy" class="joy"><div id="joyKnob" class="knob"></div></div>
+      <div class="driveinfo">
+        <p id="velText" class="mono">0.00 m/s · 0.00 rad/s</p>
+        <label class="row">Sürət <b id="manualVal"></b></label>
+        <input id="manualSpeed" type="range" step="0.01">
+        <p class="muted small">Buraxanda robot dayanır. Manual idarə avtonom hərəkəti dayandırır.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TABLES ================= -->
+  <section id="tab-tables" class="tab">
+    <div class="card">
+      <h3>Robotun olduğu yeri masa kimi saxla</h3>
+      <p class="muted">Robotu manual idarə ilə masanın yanına aparın, dayandırın və ad verin.</p>
+      <div class="row gap">
+        <input id="hereName" placeholder="Masa adı (məs. 5)">
+        <button id="hereBtn" class="primary">Saxla</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Koordinatla əlavə et</h3>
+      <div class="grid4">
+        <input id="tName" placeholder="Ad">
+        <input id="tX" type="number" step="0.01" placeholder="x (m)">
+        <input id="tY" type="number" step="0.01" placeholder="y (m)">
+        <input id="tYaw" type="number" step="1" placeholder="istiqamət °">
+      </div>
+      <button id="tAdd" class="primary full">Əlavə et</button>
+      <p class="muted">Xəritədə "Masa" aləti ilə toxunaraq da əlavə etmək olar.</p>
+    </div>
+    <div class="card">
+      <h3>Masalar</h3>
+      <div id="tableList" class="list"></div>
+      <div class="row gap">
+        <label>Dövrə <input id="tLoops" type="number" min="0" max="99" value="0"></label>
+        <button id="tRoute" class="primary">Seçilənlərə marşrut</button>
+      </div>
+      <p class="muted">Marşrut seçim sırası ilə gedir.</p>
+    </div>
+  </section>
+
+  <!-- ================= MAPPING ================= -->
+  <section id="tab-mapping" class="tab">
+    <div class="card" id="mapStartCard">
+      <h3>Yeni xəritə</h3>
+      <button id="autoMapBtn" class="primary big full">Avtonom xəritələmə</button>
+      <p class="muted">Robot ətrafı özü gəzir, xəritəni çıxarır, başlanğıca qayıdır. Xəritə avtomatik saxlanılır və istifadəyə verilir.</p>
+      <button id="manualMapBtn" class="full">Manual xəritələmə</button>
+      <p class="muted">Robotu özünüz joystik ilə sürürsünüz, sonra xəritəni saxlayırsınız.</p>
+    </div>
+
+    <div class="card hidden" id="mappingCard">
+      <h3>Xəritələmə gedir</h3>
+      <p>Vəziyyət: <b id="mappingState">—</b></p>
+      <p>Avtonom kəşf: <b id="exploreText">—</b></p>
+      <div class="row gap">
+        <button id="exploreOn" class="primary">Kəşfi başlat</button>
+        <button id="exploreOff">Kəşfi dayandır</button>
+      </div>
+      <p class="muted">Xəritəni canlı görmək üçün "Xəritə" bölməsinə keçin.</p>
+      <h3 class="mt">Xəritəni saxla</h3>
+      <div class="row gap">
+        <input id="mapName" placeholder="xerite_adi">
+        <button id="saveMap" class="primary">Saxla</button>
+      </div>
+      <label class="check"><input id="mapActivate" type="checkbox" checked> Saxla və bu xəritə ilə naviqasiyaya keç</label>
+      <button id="startNav" class="full">Saxlamadan naviqasiyaya qayıt</button>
+    </div>
+
+    <div class="card">
+      <h3>Xəritələr</h3>
+      <p>Hazırkı rejim: <b id="modeText">—</b></p>
+      <div id="mapList" class="list"></div>
+    </div>
+  </section>
+
+  <!-- ================= SETTINGS ================= -->
+  <section id="tab-settings" class="tab">
+    <div class="card">
+      <h3>Ev və şarj</h3>
+      <p>Batareya: <b id="battDetail">—</b></p>
+      <p>Ev nöqtəsi: <b id="homeText">təyin edilməyib</b></p>
+      <div class="row gap wrap">
+        <button id="homeHere" class="primary">Robotun yerini ev kimi saxla</button>
+        <button id="homeGo">Evə qayıt</button>
+      </div>
+      <p class="muted">Robotu şarj yerinə aparın, düz qoyun və "ev kimi saxla" basın. Xəritədə "Ev" aləti ilə də təyin etmək olar.</p>
+      <label class="check"><input id="autoHome" type="checkbox"> Batareya azalanda özü evə qayıtsın</label>
+      <label class="row">Qayıtma həddi <b id="autoHomeVal"></b></label>
+      <input id="autoHomeLevel" type="range" min="10" max="60" step="5">
+    </div>
+    <div class="card">
+      <label class="row">Avtonom sürət <b id="navVal"></b></label>
+      <input id="navSpeed" type="range" step="0.01">
+      <p class="muted">Robot dönmələrdə, maneə yanında və hədəfə yaxınlaşanda özü yavaşlayır.</p>
+    </div>
+    <div class="card">
+      <h3>Lokallaşma</h3>
+      <p>Dəqiqlik: <b id="locText">—</b></p>
+      <button id="relocBtn">Mövqeni avtomatik tap</button>
+      <p class="muted">Robot yerində iki dəfə dönərək xəritədə harada olduğunu axtarır. Ətraf boş olmalıdır.</p>
+    </div>
+    <div class="card">
+      <h3>Sistem</h3>
+      <p>Aktiv xəritə: <b id="activeMapText">—</b></p>
+      <button id="restartBtn">Naviqasiyanı yenidən başlat</button>
+    </div>
+  </section>
+</main>
+
+<nav class="tabbar">
+  <button data-tab="map" class="on">Xəritə</button>
+  <button data-tab="manual">Manual</button>
+  <button data-tab="tables">Masalar</button>
+  <button data-tab="mapping">Xəritələmə</button>
+  <button data-tab="settings">Ayarlar</button>
+</nav>
+
+<!-- In-page dialogs: some phone browsers (QR scanner apps) silently answer
+     window.confirm()/prompt() with "no", which made buttons look dead. -->
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+  <div class="dialog">
+    <p id="modalText"></p>
+    <input id="modalInput" class="hidden">
+    <div class="row gap end">
+      <button id="modalCancel">Ləğv et</button>
+      <button id="modalOk" class="primary">Bəli</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

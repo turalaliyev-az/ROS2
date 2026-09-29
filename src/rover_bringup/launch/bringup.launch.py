@@ -11,6 +11,13 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 
+# This robot's own units. Used when the device isn't plugged in yet at launch
+# (e.g. started at boot): motor_bridge keeps retrying and the lidar driver
+# respawns, so they connect as soon as the cable is in.
+ESP32_BY_ID = '/dev/serial/by-id/usb-1a86_USB_Single_Serial_5C4E000865-if00'
+LIDAR_BY_ID = '/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0'
+
+
 def _resolve_port(udev_link, by_id_glob, fallback):
     """Prefer a device name that survives re-plugging over the kernel's ttyACMn/ttyUSBn."""
     if os.path.exists(udev_link):
@@ -38,10 +45,10 @@ def generate_launch_description():
     declare_esp32_port = DeclareLaunchArgument(
         'esp32_port',
         default_value=_resolve_port(
-            '/dev/rover_esp32', '*USB_Single_Serial_5C4E000865*', '/dev/ttyACM0'))
+            '/dev/rover_esp32', '*USB_Single_Serial_5C4E000865*', ESP32_BY_ID))
     declare_lidar_port = DeclareLaunchArgument(
         'lidar_port',
-        default_value=_resolve_port('/dev/rover_lidar', '*CP2102*', '/dev/ttyUSB0'))
+        default_value=_resolve_port('/dev/rover_lidar', '*CP2102*', LIDAR_BY_ID))
     declare_lidar_rear_crop = DeclareLaunchArgument(
         'lidar_rear_crop', default_value='true',
         description='Mask the 20 deg behind the lidar (only needed while something sits there)')

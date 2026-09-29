@@ -311,15 +311,15 @@ route_server:
 
 velocity_smoother:
   ros__parameters:
-    # Matches the conservative FollowPath limits above -- this is the
-    # last stage before cmd_vel reaches motor_bridge, so it's the actual
-    # backstop against sudden speed jumps regardless of what the
-    # controller/recoveries ask for.
+    # Last stage before cmd_vel reaches motor_bridge: the backstop against
+    # sudden speed jumps regardless of what the controller/recoveries ask for.
+    # The linear cap is the top of the web panel's speed slider (0.08-0.3);
+    # the actual cruise speed is desired_linear_vel / the /speed_limit topic.
     smoothing_frequency: 20.0
     stamp_smoothed_velocity_with_smoothing_time: False
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.2, 0.0, 0.5]
+    max_velocity: [0.3, 0.0, 0.5]
     min_velocity: [-0.1, 0.0, -0.5]
     # Gentle speed-up (no wheel slip), firmer slow-down for obstacles.
     max_accel: [0.3, 0.0, 0.5]

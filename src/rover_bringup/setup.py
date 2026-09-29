@@ -33,6 +33,7 @@ setup(
     entry_points={
         'console_scripts': [
             'waypoints = rover_bringup.waypoints:main',
+            'explorer = rover_bringup.explorer:main',
         ],
     },
 )

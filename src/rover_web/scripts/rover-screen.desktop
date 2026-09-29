@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Rover screen (QR)
+Comment=Full-screen QR code for the rover's web control panel
+Exec=@WS@/src/rover_web/scripts/rover-screen.sh
+X-GNOME-Autostart-enabled=true

@@ -1,0 +1,19 @@
+[Unit]
+Description=Restaurant rover: motors, sensors, Nav2 and the web control panel
+# A user service that starts at boot without a login (install_autostart.sh
+# enables linger). @WS@ is replaced with the workspace path on install.
+
+[Service]
+Type=exec
+ExecStart=/bin/bash -c 'source /opt/ros/jazzy/setup.bash && source @WS@/install/setup.bash && exec ros2 launch rover_bringup robot.launch.py'
+# Every process in the unit gets SIGINT, exactly like Ctrl+C in a terminal:
+# motor_bridge sends a zero command before it closes the port.
+KillSignal=SIGINT
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=RCUTILS_COLORIZED_OUTPUT=0
+
+[Install]
+WantedBy=default.target
