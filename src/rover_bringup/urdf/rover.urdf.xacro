@@ -1,24 +1,38 @@
 <?xml version="1.0"?>
 <robot name="rover" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <!-- Measured values -->
-  <xacro:property name="wheel_radius" value="0.04511"/>
-  <xacro:property name="wheel_separation" value="0.44"/>
-  <xacro:property name="wheel_width" value="0.03"/>
+  <!-- Every dimension comes from the robot profile (~/.rover/robot.yaml, edited
+       in the web panel) through rover_bringup.profile.xacro_args(); the
+       defaults here only matter when the file is processed by hand.
+       base_footprint sits on the floor at the rotation centre (centre of the
+       wheel group for skid4, middle of the drive axle for diff2); sensor
+       poses are given relative to base_link, which is wheel_radius above it. -->
+  <xacro:arg name="drive_type" default="skid4"/>
+  <xacro:arg name="wheel_radius" default="0.07225"/>
+  <xacro:arg name="wheel_width" default="0.08"/>
+  <xacro:arg name="track" default="0.63"/>
+  <xacro:arg name="wheelbase" default="0.41"/>
+  <xacro:arg name="base_length" default="0.45"/>
+  <xacro:arg name="base_width" default="0.43"/>
+  <xacro:arg name="base_height" default="0.15"/>
+  <xacro:arg name="platform_offset_x" default="0.0"/>
+  <xacro:arg name="lidar_x" default="0.0"/>
+  <xacro:arg name="lidar_y" default="0.0"/>
+  <xacro:arg name="lidar_z" default="0.22775"/>
+  <xacro:arg name="lidar_yaw" default="0.0"/>
+  <xacro:arg name="camera_x" default="0.225"/>
+  <xacro:arg name="camera_y" default="0.0"/>
+  <xacro:arg name="camera_z" default="0.12775"/>
+  <xacro:arg name="camera_yaw" default="0.0"/>
 
-  <!-- Measured 2026-09-21 -->
-  <xacro:property name="base_length" value="0.45"/>
-  <xacro:property name="base_width" value="0.42"/>
-  <xacro:property name="base_height" value="0.15"/>
-  <xacro:property name="base_z" value="${wheel_radius}"/>
-
-  <xacro:property name="lidar_x" value="0.0"/>
-  <xacro:property name="lidar_y" value="0.0"/>
-  <xacro:property name="lidar_z" value="0.20"/>
-
-  <xacro:property name="camera_x" value="${base_length/2}"/>
-  <xacro:property name="camera_y" value="0.0"/>
-  <xacro:property name="camera_z" value="0.10"/>
+  <xacro:property name="drive_type" value="$(arg drive_type)"/>
+  <xacro:property name="wheel_radius" value="$(arg wheel_radius)"/>
+  <xacro:property name="wheel_width" value="$(arg wheel_width)"/>
+  <xacro:property name="track" value="$(arg track)"/>
+  <xacro:property name="wheelbase" value="$(arg wheelbase)"/>
+  <xacro:property name="base_length" value="$(arg base_length)"/>
+  <xacro:property name="base_width" value="$(arg base_width)"/>
+  <xacro:property name="base_height" value="$(arg base_height)"/>
 
   <material name="grey">
     <color rgba="0.55 0.55 0.55 1.0"/>
@@ -29,14 +43,18 @@
 
   <link name="base_footprint"/>
 
+  <!-- The platform box is drawn where it really is: its centre can be ahead of
+       or behind the rotation centre. -->
   <link name="base_link">
     <visual>
+      <origin xyz="$(arg platform_offset_x) 0 ${base_height / 2}" rpy="0 0 0"/>
       <geometry>
         <box size="${base_length} ${base_width} ${base_height}"/>
       </geometry>
       <material name="grey"/>
     </visual>
     <collision>
+      <origin xyz="$(arg platform_offset_x) 0 ${base_height / 2}" rpy="0 0 0"/>
       <geometry>
         <box size="${base_length} ${base_width} ${base_height}"/>
       </geometry>
@@ -46,10 +64,10 @@
   <joint name="base_footprint_joint" type="fixed">
     <parent link="base_footprint"/>
     <child link="base_link"/>
-    <origin xyz="0 0 ${base_z}" rpy="0 0 0"/>
+    <origin xyz="0 0 ${wheel_radius}" rpy="0 0 0"/>
   </joint>
 
-  <xacro:macro name="wheel" params="prefix reflect">
+  <xacro:macro name="wheel" params="prefix x y">
     <link name="${prefix}_wheel_link">
       <visual>
         <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
@@ -68,13 +86,21 @@
     <joint name="${prefix}_wheel_joint" type="continuous">
       <parent link="base_link"/>
       <child link="${prefix}_wheel_link"/>
-      <origin xyz="0 ${reflect * wheel_separation / 2} ${-base_z + wheel_radius}" rpy="0 0 0"/>
+      <origin xyz="${x} ${y} 0" rpy="0 0 0"/>
       <axis xyz="0 1 0"/>
     </joint>
   </xacro:macro>
 
-  <xacro:wheel prefix="left" reflect="1"/>
-  <xacro:wheel prefix="right" reflect="-1"/>
+  <xacro:if value="${drive_type == 'skid4'}">
+    <xacro:wheel prefix="front_left" x="${wheelbase / 2}" y="${track / 2}"/>
+    <xacro:wheel prefix="front_right" x="${wheelbase / 2}" y="${-track / 2}"/>
+    <xacro:wheel prefix="rear_left" x="${-wheelbase / 2}" y="${track / 2}"/>
+    <xacro:wheel prefix="rear_right" x="${-wheelbase / 2}" y="${-track / 2}"/>
+  </xacro:if>
+  <xacro:unless value="${drive_type == 'skid4'}">
+    <xacro:wheel prefix="left" x="0" y="${track / 2}"/>
+    <xacro:wheel prefix="right" x="0" y="${-track / 2}"/>
+  </xacro:unless>
 
   <link name="laser_frame">
     <visual>
@@ -87,7 +113,7 @@
   <joint name="laser_joint" type="fixed">
     <parent link="base_link"/>
     <child link="laser_frame"/>
-    <origin xyz="${lidar_x} ${lidar_y} ${lidar_z}" rpy="0 0 0"/>
+    <origin xyz="$(arg lidar_x) $(arg lidar_y) $(arg lidar_z)" rpy="0 0 $(arg lidar_yaw)"/>
   </joint>
 
   <link name="camera_link">
@@ -101,7 +127,7 @@
   <joint name="camera_joint" type="fixed">
     <parent link="base_link"/>
     <child link="camera_link"/>
-    <origin xyz="${camera_x} ${camera_y} ${camera_z}" rpy="0 0 0"/>
+    <origin xyz="$(arg camera_x) $(arg camera_y) $(arg camera_z)" rpy="0 0 $(arg camera_yaw)"/>
   </joint>
 
   <link name="imu_link"/>

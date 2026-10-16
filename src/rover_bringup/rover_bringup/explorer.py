@@ -8,15 +8,16 @@ as a string on /explore/status (latched).
 """
 import math
 
+from builtin_interfaces.msg import Duration
+from nav2_msgs.action import NavigateToPose, Spin
+from nav_msgs.msg import OccupancyGrid
 import numpy as np
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rover_bringup import profile as robot_profile
 from scipy import ndimage
-from builtin_interfaces.msg import Duration
-from nav2_msgs.action import NavigateToPose, Spin
-from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -29,9 +30,10 @@ class Explorer(Node):
     def __init__(self):
         super().__init__('explorer')
         self.declare_parameter('min_frontier_size_m', 0.4)
-        # A goal closer than this to a wall puts the ~0.31 m (circumscribed)
-        # footprint into lethal cost, and the planner rejects it.
-        self.declare_parameter('robot_clearance_m', 0.35)
+        # A goal closer to a wall than the robot's half-width puts the footprint
+        # into lethal cost and the planner rejects it (robot profile + margin).
+        self.declare_parameter('robot_clearance_m',
+                               robot_profile.derive(robot_profile.load())['explorer_clearance'])
         self.declare_parameter('goal_timeout_s', 90.0)
         self.declare_parameter('blacklist_radius_m', 0.6)
         # Unknown pockets smaller than this inside mapped space (the cells under
@@ -209,7 +211,8 @@ class Explorer(Node):
             self.spin_handle.cancel_goal_async()
 
     def _look_around(self):
-        """One slow turn in place before picking any goal.
+        """
+        Turn slowly in place once before picking any goal.
 
         slam_toolbox adds a scan only after the robot has moved (0.2 m/0.2 rad)
         and marks a cell only once two scans have seen it, so a robot that has

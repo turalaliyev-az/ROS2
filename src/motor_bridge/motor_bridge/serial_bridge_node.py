@@ -1,17 +1,23 @@
 import collections
+import json
 import math
 import struct
 import threading
 import time
 
+from geometry_msgs.msg import Quaternion, TransformStamped, Twist
+from motor_bridge.stall_monitor import StallMonitor
+from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
-import serial
-
-from geometry_msgs.msg import Twist, TransformStamped, Quaternion
-from nav_msgs.msg import Odometry
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu
+import serial
+from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
+
+LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                     reliability=ReliabilityPolicy.RELIABLE)
 
 FRAME_LEN = 29
 TX_SYNC = b'\xaa\x55'
@@ -66,6 +72,17 @@ class MotorBridgeNode(Node):
         self.declare_parameter('cmd_send_rate_hz', 20.0)
         self.declare_parameter('odom_publish_rate_hz', 50.0)
         self.declare_parameter('velocity_window_s', 0.1)
+        # The drive unit is mounted turned round: its forward is the robot's
+        # backward. Rotation is unaffected (a half turn about the vertical axis
+        # keeps left turns left turns); only the sign of linear motion flips,
+        # in the commands and in the odometry.
+        self.declare_parameter('reverse_drive', False)
+        # Drive fault: a wheel commanded at >= stall_min_speed_mps that stays
+        # under stall_ratio of it for stall_hold_s (stuck, blocked, dead motor,
+        # broken wire) stops the motors and is reported on drive/fault.
+        self.declare_parameter('stall_min_speed_mps', 0.05)
+        self.declare_parameter('stall_ratio', 0.2)
+        self.declare_parameter('stall_hold_s', 1.5)
         self.declare_parameter('publish_tf', True)
         self.declare_parameter('odom_frame_id', 'odom')
         self.declare_parameter('base_frame_id', 'base_footprint')
@@ -85,6 +102,11 @@ class MotorBridgeNode(Node):
         cmd_rate = self.get_parameter('cmd_send_rate_hz').value
         odom_rate = self.get_parameter('odom_publish_rate_hz').value
         self.velocity_window_ns = int(self.get_parameter('velocity_window_s').value * 1e9)
+        self.drive_sign = -1.0 if self.get_parameter('reverse_drive').value else 1.0
+        self.stall = StallMonitor(min_speed=self.get_parameter('stall_min_speed_mps').value,
+                                  ratio=self.get_parameter('stall_ratio').value,
+                                  hold_s=self.get_parameter('stall_hold_s').value)
+        self._measured = (0.0, 0.0, 0.0)   # (monotonic time, left, right) wheel m/s, drive frame
         self.publish_tf = self.get_parameter('publish_tf').value
         self.odom_frame_id = self.get_parameter('odom_frame_id').value
         self.base_frame_id = self.get_parameter('base_frame_id').value
@@ -98,6 +120,8 @@ class MotorBridgeNode(Node):
 
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.imu_pub = self.create_publisher(Imu, 'imu/data_raw', 10)
+        self.fault_pub = self.create_publisher(String, 'drive/fault', LATCHED)
+        self.fault_pub.publish(String(data=''))
         # Only create the broadcaster when this node owns odom->base TF: the
         # constructor alone registers a (silent) /tf publisher.
         self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
@@ -228,7 +252,7 @@ class MotorBridgeNode(Node):
 
     def cmd_vel_callback(self, msg: Twist):
         with self._cmd_lock:
-            self._target_v = msg.linear.x
+            self._target_v = self.drive_sign * msg.linear.x
             self._target_w = msg.angular.z
             self._last_cmd_time = time.monotonic()
 
@@ -255,8 +279,33 @@ class MotorBridgeNode(Node):
             v_left *= scale
             v_right *= scale
 
+        t_meas, meas_l, meas_r = self._measured
+        if time.monotonic() - t_meas > 0.3:
+            meas_l = meas_r = 0.0   # no wheel feedback: as good as not moving
+        was_faulted = self.stall.fault is not None
+        fault = self.stall.update(v_left, v_right, meas_l, meas_r, self.cmd_period)
+        if fault is not None:
+            if not was_faulted:
+                self._report_fault(fault)
+            self._v = self._w = 0.0
+            v_left = v_right = 0.0
+        elif was_faulted:
+            self.get_logger().info('Drive fault cleared (commanded speed back to zero)')
+            self.fault_pub.publish(String(data=''))
+
         self._send_targets(v_left / self.meters_per_tick_left,
                            v_right / self.meters_per_tick_right)
+
+    def _report_fault(self, fault):
+        # In the robot's frame: with a reversed drive, its left wheel is the drive's right one.
+        wheel = fault['wheel']
+        if self.drive_sign < 0:
+            wheel = 'right' if wheel == 'left' else 'left'
+        report = dict(fault, wheel=wheel, time=time.time())
+        self.get_logger().error(
+            f"Drive fault: {wheel} wheel commanded {fault['target']:+.2f} m/s but turning at "
+            f"{fault['measured']:+.2f} m/s for {fault['seconds']:.1f} s; motors stopped")
+        self.fault_pub.publish(String(data=json.dumps(report)))
 
     def _send_targets(self, ticks_per_s_left: float, ticks_per_s_right: float):
         tl = max(-INT16_MAX, min(INT16_MAX, int(round(ticks_per_s_left))))
@@ -306,7 +355,7 @@ class MotorBridgeNode(Node):
 
         dist_l = delta_l * self.meters_per_tick_left
         dist_r = delta_r * self.meters_per_tick_right
-        dist_center = (dist_l + dist_r) / 2.0
+        dist_center = self.drive_sign * (dist_l + dist_r) / 2.0
         dtheta = (dist_r - dist_l) / self.wheel_separation
         self._x += dist_center * math.cos(self._theta + dtheta / 2.0)
         self._y += dist_center * math.sin(self._theta + dtheta / 2.0)
@@ -325,7 +374,8 @@ class MotorBridgeNode(Node):
         if span > 0.0:
             vl = (enc_l - l0) * self.meters_per_tick_left / span
             vr = (enc_r - r0) * self.meters_per_tick_right / span
-            v = (vl + vr) / 2.0
+            self._measured = (time.monotonic(), vl, vr)
+            v = self.drive_sign * (vl + vr) / 2.0
             w = (vr - vl) / self.wheel_separation
 
         quat = Quaternion(x=0.0, y=0.0,

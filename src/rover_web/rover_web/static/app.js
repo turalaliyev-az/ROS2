@@ -1,8 +1,6 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const ROBOT_LEN = 0.45;
-const ROBOT_WID = 0.42;
 
 let ws = null;
 let state = null;
@@ -128,7 +126,7 @@ document.querySelectorAll('[data-goto-tab]').forEach((b) => {
 
 const MODE_NAMES = { navigation: 'Naviqasiya', mapping: 'Xəritələmə', idle: 'Gözləmə' };
 const MODE_STATES = { ready: 'hazır', starting: 'başladılır…', waiting: 'motor və lidar gözlənilir…',
-                      error: 'xəta', idle: '' };
+                      localizing: 'mövqe yoxlanılır…', error: 'xəta', idle: '' };
 
 function exploreText(s) {
   if (s.explore_pending) return 'xəritələmə hazır olan kimi başlayacaq…';
@@ -155,7 +153,8 @@ function render() {
   const pill = $('modePill');
   const stateText = MODE_STATES[s.mode_state] || '';
   pill.textContent = `${MODE_NAMES[s.mode] || s.mode}${stateText ? ' · ' + stateText : ''}`;
-  pill.className = 'pill ' + ({ ready: 'ok', starting: 'warn', waiting: 'warn', error: 'bad' }[s.mode_state] || '');
+  pill.className = 'pill ' + ({ ready: 'ok', starting: 'warn', waiting: 'warn', localizing: 'warn',
+                                 error: 'bad' }[s.mode_state] || '');
 
   $('sEsp').classList.toggle('on', s.sensors.esp32);
   $('sLidar').classList.toggle('on', s.sensors.lidar);
@@ -180,8 +179,8 @@ function render() {
   $('homeBtn').classList.toggle('on', nav.active && nav.kind === 'home');
 
   $('velText').textContent = `${s.velocity[0].toFixed(2)} m/s · ${s.velocity[1].toFixed(2)} rad/s`;
-  syncSlider('navSpeed', 'navVal', s.speed.nav, s.speed.nav_range, (v) => `${v.toFixed(2)} m/s`);
-  syncSlider('manualSpeed', 'manualVal', s.speed.manual, s.speed.manual_range, (v) => `${v.toFixed(2)} m/s`);
+  syncSlider('navSpeed', 'navVal', s.speed.nav, s.speed.nav_range, mps);
+  syncSlider('manualSpeed', 'manualVal', s.speed.manual, s.speed.manual_range, mps);
   syncSlider('autoHomeLevel', 'autoHomeVal', s.auto_home.level, [10, 60], (v) => `${v}%`);
   if (!sliderBusy.autoHome) $('autoHome').checked = s.auto_home.on;
 
@@ -207,6 +206,8 @@ function render() {
     ? `±${s.loc.std_xy.toFixed(2)} m, ±${s.loc.std_yaw.toFixed(0)}°${s.loc_confirmed ? '' : ' (təsdiqlənməyib)'}`
     : (s.mode === 'navigation' ? 'gözlənilir' : 'naviqasiya rejimində deyil');
   $('activeMapText').textContent = s.active_map || '—';
+  $('robotPending').classList.toggle('hidden', !(s.robot && s.robot.pending_restart));
+  renderPerception(s);
 
   const tablesJson = JSON.stringify(s.tables);
   if (tablesJson !== lastTablesJson) {
@@ -269,7 +270,7 @@ function bindSlider(id, labelId, onChange, label) {
     setTimeout(() => { sliderBusy[id] = false; }, 800);
   });
 }
-const mps = (v) => `${v.toFixed(2)} m/s`;
+const mps = (v) => `${v.toFixed(2)} m/s · ${(v * 3.6).toFixed(1)} km/saat`;
 bindSlider('navSpeed', 'navVal', (v) => send('speed', { nav: v }), mps);
 bindSlider('manualSpeed', 'manualVal', (v) => send('speed', { manual: v }), mps);
 bindSlider('autoHomeLevel', 'autoHomeVal', (v) => send('auto_home', { level: v }), (v) => `${v}%`);
@@ -399,24 +400,41 @@ function drawPoints(flat, color) {
   }
 }
 
+// Footprint used until the robot profile arrives with the first state.
+const FALLBACK_FOOTPRINT = [[0.225, 0.21], [0.225, -0.21], [-0.225, -0.21], [-0.225, 0.21]];
+
 function drawRobot(p) {
   const [sx, sy] = w2s(p.x, p.y);
+  const geo = state && state.robot;
+  const fp = geo ? geo.footprint : FALLBACK_FOOTPRINT;
+  const k = view.scale;
   ctx.save();
   ctx.translate(sx, sy);
   ctx.rotate(-p.yaw);
-  const l = ROBOT_LEN * view.scale;
-  const w = ROBOT_WID * view.scale;
-  ctx.fillStyle = 'rgba(59,130,246,.55)';
+  // Robot frame on the canvas: x forward -> +x, y left -> -y.
+  if (geo) {
+    const r = geo.wheel_radius;
+    const hw = geo.wheel_width / 2;
+    ctx.fillStyle = '#111827';
+    for (const w of geo.wheels) ctx.fillRect((w.x - r) * k, (-w.y - hw) * k, 2 * r * k, 2 * hw * k);
+  }
+  ctx.beginPath();
+  fp.forEach(([x, y], i) => (i ? ctx.lineTo(x * k, -y * k) : ctx.moveTo(x * k, -y * k)));
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(59,130,246,.45)';
   ctx.strokeStyle = '#1d4ed8';
   ctx.lineWidth = 2;
-  ctx.fillRect(-l / 2, -w / 2, l, w);
-  ctx.strokeRect(-l / 2, -w / 2, l, w);
+  ctx.fill();
+  ctx.stroke();
+  const front = Math.max(...fp.map((q) => q[0])) * k;
+  const half = Math.max(...fp.map((q) => q[1])) * k;
+  const tip = Math.max(front, 10);
+  const len = Math.max(front * 0.6, 8);
   ctx.fillStyle = '#fff';
   ctx.beginPath();
-  const tip = Math.max(l / 2, 10);
   ctx.moveTo(tip, 0);
-  ctx.lineTo(tip - Math.max(l * 0.35, 8), -Math.max(w * 0.25, 6));
-  ctx.lineTo(tip - Math.max(l * 0.35, 8), Math.max(w * 0.25, 6));
+  ctx.lineTo(tip - len, -Math.max(half * 0.3, 6));
+  ctx.lineTo(tip - len, Math.max(half * 0.3, 6));
   ctx.closePath();
   ctx.fill();
   ctx.restore();
@@ -442,6 +460,7 @@ function draw() {
     drawPoints(state.scan.camera, '#0891b2');
     drawPoints(state.scan.lidar, '#dc2626');
   }
+  drawObjects();
 
   for (const [name, t] of Object.entries(state.tables || {})) {
     drawArrow(t.x, t.y, t.yaw, '#b45309', 0.25);
@@ -942,11 +961,500 @@ $('autoHome').addEventListener('change', () => {
 $('stopBtn').addEventListener('click', () => send('stop'));
 $('navCancel').addEventListener('click', () => send('stop'));
 $('relocBtn').addEventListener('click', async () => {
-  if (await ask('Robot yerində iki dəfə dönəcək. Ətraf boşdur?', { okLabel: 'Başlat' })) send('relocalize');
+  if (await ask('Robot əvvəlcə yerində durub lidarla axtaracaq; tapılmasa yerində iki dəfə dönəcək. '
+                + 'Ətraf boşdur?', { okLabel: 'Başlat' })) send('relocalize');
 });
 $('restartBtn').addEventListener('click', async () => {
   if (await ask('Naviqasiya yenidən başladılsın?', { okLabel: 'Yenidən başlat' })) send('restart');
 });
+
+// ======================= object recognition =======================
+
+const OBJECT_NAMES = { person: 'insan', chair: 'stul', table: 'masa', sofa: 'divan' };
+const OBJECT_COLORS = { person: '#f97316', chair: '#3b82f6', table: '#16a34a', sofa: '#a855f7' };
+const PERCEPTION_STATUS = {
+  ok: 'işləyir (GPU)', 'ok (CPU)': 'işləyir (CPU, yavaş)', loading: 'model yüklənir…',
+  'no camera': 'kamera görüntüsü yoxdur', '': 'tanıma node-u işləmir',
+};
+let lastCandJson = '';
+
+function renderPerception(s) {
+  const p = s.perception;
+  $('percText').textContent = PERCEPTION_STATUS[p.status] ||
+    (p.status.startsWith('error') ? `xəta: ${p.status.slice(7)}` : p.status);
+  if (!sliderBusy.peopleGuard) $('peopleGuard').checked = p.people_guard;
+  if (!sliderBusy.tableApproach) $('tableApproach').checked = p.table_approach;
+  syncSlider('tableGap', 'tableGapVal', Math.round(p.table_gap * 100), [5, 60], (v) => `${v} sm`);
+
+  const bar = $('peopleBar');
+  bar.classList.toggle('hidden', !s.people);
+  bar.textContent = s.people === 'wait' ? 'Qarşıda insan var — keçməsini gözləyir'
+    : 'İnsanlar yaxındır — yavaş gedir';
+
+  const candJson = JSON.stringify(s.candidates);
+  if (candJson !== lastCandJson) {
+    lastCandJson = candJson;
+    renderCandidates(s.candidates);
+  }
+  drawCamOverlay();
+}
+
+function renderCandidates(cands) {
+  $('candCard').classList.toggle('hidden', !cands.length);
+  const list = $('candList');
+  list.innerHTML = '';
+  for (const c of cands) {
+    const row = document.createElement('div');
+    row.className = 'item';
+    const label = document.createElement('div');
+    label.className = 'name';
+    const b = document.createElement('b');
+    b.textContent = `Masa təklifi #${c.id}`;
+    const small = document.createElement('small');
+    small.className = 'muted';
+    small.textContent = `x ${fmt(c.x)}, y ${fmt(c.y)} · ${c.n} dəfə görülüb`;
+    label.append(b, small);
+    const keep = document.createElement('button');
+    keep.className = 'small primary';
+    keep.textContent = 'Saxla';
+    keep.addEventListener('click', async () => {
+      const name = await askText(`Masa təklifi #${c.id} üçün ad:`, 'məs. 5');
+      if (name) send('candidate_accept', { id: c.id, name });
+    });
+    const drop = document.createElement('button');
+    drop.className = 'small';
+    drop.textContent = 'Rədd et';
+    drop.addEventListener('click', async () => {
+      if (await ask(`Təklif #${c.id} rədd edilsin? Bu yerdə bir daha təklif olunmayacaq.`,
+        { okLabel: 'Rədd et', danger: true })) send('candidate_dismiss', { id: c.id });
+    });
+    row.append(label, keep, drop);
+    list.appendChild(row);
+  }
+}
+
+function drawCamOverlay() {
+  const cv = $('camOverlay');
+  const r = cv.getBoundingClientRect();
+  if (!r.width) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(r.width * dpr) || cv.height !== Math.round(r.height * dpr)) {
+    cv.width = Math.round(r.width * dpr);
+    cv.height = Math.round(r.height * dpr);
+  }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, r.width, r.height);
+  const img = $('camImg');
+  // Boxes are in colour-image coordinates; the depth picture has another field of view.
+  if (camKind !== 'color' || !state || !state.objects || !img.naturalWidth || !img.getAttribute('src')) return;
+  const scale = Math.min(r.width / img.naturalWidth, r.height / img.naturalHeight);
+  const dw = img.naturalWidth * scale;
+  const dh = img.naturalHeight * scale;
+  const ox = (r.width - dw) / 2;
+  const oy = (r.height - dh) / 2;
+  g.font = 'bold 12px system-ui';
+  g.lineWidth = 2;
+  for (const o of state.objects) {
+    const [x1, y1, x2, y2] = o.box;
+    const color = OBJECT_COLORS[o.cls] || '#fff';
+    const x = ox + x1 * dw;
+    const y = oy + y1 * dh;
+    g.strokeStyle = color;
+    g.strokeRect(x, y, (x2 - x1) * dw, (y2 - y1) * dh);
+    const text = `${OBJECT_NAMES[o.cls] || o.cls}${o.dist != null ? ` ${o.dist.toFixed(1)} m` : ''}`;
+    const tw = g.measureText(text).width + 8;
+    g.fillStyle = color;
+    g.fillRect(x, Math.max(0, y - 17), tw, 17);
+    g.fillStyle = '#fff';
+    g.fillText(text, x + 4, Math.max(12, y - 5));
+  }
+}
+$('camImg').addEventListener('load', drawCamOverlay);
+
+function drawObjects() {
+  if (!state) return;
+  if (showScan) {
+    for (const o of state.objects || []) {
+      if (!o.map) continue;
+      const [sx, sy] = w2s(o.map[0], o.map[1]);
+      const color = OBJECT_COLORS[o.cls] || '#fff';
+      ctx.fillStyle = color;
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      if (o.cls === 'person') {
+        ctx.beginPath();
+        ctx.arc(sx, sy, Math.max(6, 0.25 * view.scale), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        const half = Math.max(5, (o.cls === 'chair' ? 0.2 : 0.3) * view.scale);
+        ctx.fillRect(sx - half, sy - half, 2 * half, 2 * half);
+        ctx.strokeRect(sx - half, sy - half, 2 * half, 2 * half);
+      }
+    }
+  }
+  for (const c of state.candidates || []) {
+    const [sx, sy] = w2s(c.x, c.y);
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, Math.max(8, c.r * view.scale), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = 'bold 14px system-ui';
+    ctx.fillStyle = '#b45309';
+    ctx.textAlign = 'center';
+    ctx.fillText('?', sx, sy + 5);
+    ctx.textAlign = 'left';
+  }
+}
+
+$('peopleGuard').addEventListener('change', () => {
+  sliderBusy.peopleGuard = true;
+  send('perception', { people_guard: $('peopleGuard').checked });
+  setTimeout(() => { sliderBusy.peopleGuard = false; }, 800);
+});
+$('tableApproach').addEventListener('change', () => {
+  sliderBusy.tableApproach = true;
+  send('perception', { table_approach: $('tableApproach').checked });
+  setTimeout(() => { sliderBusy.tableApproach = false; }, 800);
+});
+bindSlider('tableGap', 'tableGapVal', (v) => send('perception', { table_gap: v / 100 }), (v) => `${v} sm`);
+
+// ======================= robot profile editor =======================
+// Dimensions and sensor positions; the server validates them, derives the
+// footprint etc., and a saved profile takes effect after a restart.
+
+const DRIVE_LABELS = { skid4: '4 aparıcı təkər (tank dönmə)', diff2: '2 aparıcı təkər + sərbəst təkərlər' };
+// [section, key, label, unit, scale (display = value * scale), step, visible(profile)]
+const ROBOT_GROUPS = [
+  ['Platforma', [
+    ['platform', 'length', 'Uzunluq', 'sm', 100, 0.5],
+    ['platform', 'width', 'En', 'sm', 100, 0.5],
+    ['platform', 'height', 'Hündürlük', 'sm', 100, 0.5],
+  ]],
+  ['Hərəkət sistemi', [
+    ['drive', 'type', 'Növ', '', 0, 0],
+    ['drive', 'wheel_diameter', 'Təkər diametri', 'mm', 1000, 0.5],
+    ['drive', 'wheel_width', 'Təkər eni', 'mm', 1000, 1],
+    ['drive', 'track', 'Sol–sağ təkər mərkəzləri arası', 'sm', 100, 0.1],
+    ['drive', 'wheelbase', 'Ön–arxa ox arası', 'sm', 100, 0.1, (p) => p.drive.type === 'skid4'],
+    ['drive', 'center_x', 'Təkərlərin mərkəzi, platformanın mərkəzindən irəli +', 'sm', 100, 0.5],
+    ['drive', 'ticks_per_rev_left', 'Sol enkoder, impuls / təkər dövrü', '', 1, 1],
+    ['drive', 'ticks_per_rev_right', 'Sağ enkoder, impuls / təkər dövrü', '', 1, 1],
+    ['drive', 'turn_slip_factor', 'Dönmə sürüşmə əmsalı, 1 = sürüşmə yoxdur', '', 1, 0.05],
+    ['drive', 'max_speed', 'Maksimal sürət (manual və avtonom)', 'km/saat', 3.6, 0.1],
+    ['drive', 'reversed', 'Ötürücü tərs quraşdırılıb (mühərriklərin irəlisi kameranın əksinədir)', '', 0, 0],
+  ]],
+  ['Lidar', [
+    ['lidar', 'x', 'x, irəli +', 'sm', 100, 0.5],
+    ['lidar', 'y', 'y, sola +', 'sm', 100, 0.5],
+    ['lidar', 'height', 'Yerdən hündürlük', 'sm', 100, 0.5],
+    ['lidar', 'yaw', 'Bucaq, 0 = irəli', '°', 1, 1],
+    ['lidar', 'mask', 'Robotun öz hissəsini gizlət', '', 0, 0],
+    ['lidar', 'mask_from', 'Gizlədilən sektor: başlanğıc', '°', 1, 1, (p) => p.lidar.mask],
+    ['lidar', 'mask_to', 'Gizlədilən sektor: son', '°', 1, 1, (p) => p.lidar.mask],
+  ]],
+  ['Kamera', [
+    ['camera', 'x', 'x, irəli +', 'sm', 100, 0.5],
+    ['camera', 'y', 'y, sola +', 'sm', 100, 0.5],
+    ['camera', 'height', 'Yerdən hündürlük', 'sm', 100, 0.5],
+    ['camera', 'yaw', 'Bucaq, 0 = irəli', '°', 1, 1],
+  ]],
+  ['Təhlükəsizlik', [
+    ['safety', 'padding', 'Kontur ehtiyatı', 'sm', 100, 0.5],
+    ['safety', 'extra_inflation', 'Maneədən əlavə uzaq durma', 'sm', 100, 1],
+  ]],
+];
+
+let robotSaved = null;   // {profile, derived} as last loaded from the server
+let robotDraft = null;   // profile being edited
+let robotDerived = null;
+let robotPreviewTimer = null;
+
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const cm = (m) => Math.round(m * 1000) / 10;
+
+function robotSummary(info) {
+  const p = info.profile;
+  const d = info.derived;
+  return `${DRIVE_LABELS[p.drive.type]} · təkər ⌀${Math.round(p.drive.wheel_diameter * 10000) / 10} mm · ` +
+    `iz ${cm(p.drive.track)} sm · kontur ${cm(d.size.length)} × ${cm(d.size.width)} sm`;
+}
+
+function buildRobotForm() {
+  const form = $('robotForm');
+  form.innerHTML = '';
+  for (const [title, fields] of ROBOT_GROUPS) {
+    const group = document.createElement('div');
+    group.className = 'fgroup';
+    const h = document.createElement('h4');
+    h.textContent = title;
+    const grid = document.createElement('div');
+    grid.className = 'fgrid';
+    for (const [section, key, label, unit, scale, step, visible] of fields) {
+      const field = document.createElement('label');
+      field.className = 'field';
+      field.dataset.section = section;
+      field.dataset.key = key;
+      const text = document.createElement('span');
+      text.textContent = unit ? `${label} (${unit})` : label;
+      let input;
+      if (key === 'type') {
+        input = document.createElement('select');
+        for (const [value, name] of Object.entries(DRIVE_LABELS)) {
+          const o = document.createElement('option');
+          o.value = value;
+          o.textContent = name;
+          input.appendChild(o);
+        }
+        field.classList.add('wide');
+      } else if (key === 'mask' || key === 'reversed') {
+        input = document.createElement('input');
+        input.type = 'checkbox';
+        field.classList.add('wide', 'inline');
+      } else {
+        input = document.createElement('input');
+        input.type = 'number';
+        input.inputMode = 'decimal';
+        input.step = String(step);
+        if (label.length > 26) field.classList.add('wide');
+      }
+      input.addEventListener(input.type === 'checkbox' || key === 'type' ? 'change' : 'input', () => {
+        readRobotForm();
+        updateRobotVisibility();
+        scheduleRobotPreview();
+      });
+      field._meta = { section, key, scale, visible };
+      field.append(text, input);
+      grid.appendChild(field);
+    }
+    group.append(h, grid);
+    form.appendChild(group);
+  }
+}
+
+function robotFields() {
+  return [...$('robotForm').querySelectorAll('.field')];
+}
+
+function fillRobotForm(profile) {
+  for (const field of robotFields()) {
+    const { section, key, scale } = field._meta;
+    const input = field.querySelector('input, select');
+    const value = profile[section][key];
+    if (input.type === 'checkbox') input.checked = !!value;
+    else if (input.tagName === 'SELECT') input.value = value;
+    else input.value = String(Math.round(value * scale * 100) / 100);
+  }
+  updateRobotVisibility();
+}
+
+function readRobotForm() {
+  for (const field of robotFields()) {
+    const { section, key, scale } = field._meta;
+    const input = field.querySelector('input, select');
+    if (input.type === 'checkbox') robotDraft[section][key] = input.checked;
+    else if (input.tagName === 'SELECT') robotDraft[section][key] = input.value;
+    else if (input.value !== '') robotDraft[section][key] = Number(input.value) / scale;
+  }
+}
+
+function updateRobotVisibility() {
+  for (const field of robotFields()) {
+    const { visible } = field._meta;
+    field.classList.toggle('hidden', !!visible && !visible(robotDraft));
+  }
+}
+
+async function robotRequest(body) {
+  const init = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {};
+  const r = await fetch('/api/robot', { cache: 'no-store', ...init });
+  if (!r.ok) throw new Error(String(r.status));
+  return r.json();
+}
+
+async function loadRobot() {
+  try {
+    robotSaved = await robotRequest();
+  } catch (e) {
+    return;
+  }
+  $('robotSummary').textContent = robotSummary(robotSaved);
+  if ($('robotEditor').classList.contains('hidden')) {
+    robotDraft = clone(robotSaved.profile);
+    robotDerived = robotSaved.derived;
+  }
+}
+
+function showRobotResult(info) {
+  robotDerived = info.derived;
+  const d = info.derived;
+  $('robotDerived').textContent =
+    `Kontur: ${cm(d.size.length)} × ${cm(d.size.width)} sm · Dönəndə tutduğu dairə: ⌀${cm(2 * d.circumscribed_radius)} sm · ` +
+    `Maneədən uzaq durma: ${cm(d.inflation_radius)} sm`;
+  const errors = $('robotErrors');
+  errors.classList.toggle('hidden', !info.errors.length);
+  errors.textContent = info.errors.length ? `Yanlış dəyərlər: ${info.errors.join(', ')}` : '';
+  $('robotSave').disabled = info.errors.length > 0;
+  drawRobotPreview();
+}
+
+function scheduleRobotPreview() {
+  clearTimeout(robotPreviewTimer);
+  robotPreviewTimer = setTimeout(async () => {
+    try {
+      showRobotResult(await robotRequest({ profile: robotDraft, save: false }));
+    } catch (e) {
+      toast('Robotla əlaqə yoxdur', 'error');
+    }
+  }, 250);
+}
+
+function drawRobotPreview() {
+  const c = $('robotPreview');
+  const r = c.getBoundingClientRect();
+  if (!r.width || !robotDerived) return;
+  const dpr = window.devicePixelRatio || 1;
+  c.width = Math.round(r.width * dpr);
+  c.height = Math.round(r.height * dpr);
+  const g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, r.width, r.height);
+
+  const p = robotDraft;
+  const d = robotDerived;
+  const cx = p.drive.center_x;
+  // Everything in rotation-centre coordinates; forward is up on screen.
+  const pts = [...d.footprint, [d.lidar.x, d.lidar.y], [d.camera.x, d.camera.y]];
+  const ext = Math.max(...pts.map(([x, y]) => Math.max(Math.abs(x), Math.abs(y)))) + 0.12;
+  const k = Math.min(r.width, r.height) / (2 * ext);
+  const ox = r.width / 2;
+  const oy = r.height / 2;
+  const S = (x, y) => [ox - y * k, oy - x * k];
+
+  g.strokeStyle = 'rgba(139,154,179,.15)';
+  g.lineWidth = 1;
+  for (let v = -Math.ceil(ext * 10) / 10; v <= ext; v += 0.1) {
+    const [a] = S(0, v);
+    const [, b] = S(v, 0);
+    g.beginPath(); g.moveTo(a, 0); g.lineTo(a, r.height); g.stroke();
+    g.beginPath(); g.moveTo(0, b); g.lineTo(r.width, b); g.stroke();
+  }
+
+  // platform
+  const pl = p.platform;
+  const [px, py] = S(pl.length / 2 - cx, pl.width / 2);
+  g.fillStyle = '#475569';
+  g.fillRect(px, py, pl.width * k, pl.length * k);
+
+  // wheels
+  g.fillStyle = '#0f172a';
+  g.strokeStyle = '#94a3b8';
+  for (const w of d.wheels) {
+    const [wx, wy] = S(w.x + d.wheel_radius, w.y + p.drive.wheel_width / 2);
+    g.fillRect(wx, wy, p.drive.wheel_width * k, 2 * d.wheel_radius * k);
+    g.strokeRect(wx, wy, p.drive.wheel_width * k, 2 * d.wheel_radius * k);
+  }
+
+  // footprint
+  g.setLineDash([6, 4]);
+  g.strokeStyle = '#ef4444';
+  g.lineWidth = 2;
+  g.beginPath();
+  d.footprint.forEach(([x, y], i) => { const [a, b] = S(x, y); if (i) g.lineTo(a, b); else g.moveTo(a, b); });
+  g.closePath();
+  g.stroke();
+  g.setLineDash([]);
+
+  const deg2rad = Math.PI / 180;
+  const wedge = (x, y, yawDeg, fromDeg, toDeg, len, fill) => {
+    const [a, b] = S(x, y);
+    g.fillStyle = fill;
+    g.beginPath();
+    g.moveTo(a, b);
+    for (let t = fromDeg; t <= toDeg; t += 2) {
+      const th = (yawDeg + t) * deg2rad;
+      const [ex, ey] = S(x + Math.cos(th) * len, y + Math.sin(th) * len);
+      g.lineTo(ex, ey);
+    }
+    g.closePath();
+    g.fill();
+  };
+
+  // camera: D435 depth field of view (~87 deg)
+  wedge(d.camera.x, d.camera.y, p.camera.yaw, -43.5, 43.5, 0.35, 'rgba(34,197,94,.18)');
+  {
+    const [a, b] = S(d.camera.x, d.camera.y);
+    g.save();
+    g.translate(a, b);
+    g.rotate(-p.camera.yaw * deg2rad);
+    g.fillStyle = '#22c55e';
+    g.fillRect(-0.045 * k, -0.0125 * k, 0.09 * k, 0.025 * k);
+    g.restore();
+  }
+
+  // lidar, with the hidden sector
+  if (p.lidar.mask) {
+    const to = p.lidar.mask_to >= p.lidar.mask_from ? p.lidar.mask_to : p.lidar.mask_to + 360;
+    wedge(d.lidar.x, d.lidar.y, 0, p.lidar.mask_from, to, 0.3, 'rgba(239,68,68,.35)');
+  }
+  {
+    const [a, b] = S(d.lidar.x, d.lidar.y);
+    g.fillStyle = '#3b82f6';
+    g.beginPath(); g.arc(a, b, Math.max(0.035 * k, 4), 0, Math.PI * 2); g.fill();
+    const th = p.lidar.yaw * deg2rad;
+    const [ex, ey] = S(d.lidar.x + Math.cos(th) * 0.08, d.lidar.y + Math.sin(th) * 0.08);
+    g.strokeStyle = '#fff'; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(a, b); g.lineTo(ex, ey); g.stroke();
+  }
+
+  // rotation centre
+  const [rx, ry] = S(0, 0);
+  g.strokeStyle = '#f59e0b'; g.lineWidth = 2;
+  g.beginPath(); g.moveTo(rx - 7, ry); g.lineTo(rx + 7, ry); g.moveTo(rx, ry - 7); g.lineTo(rx, ry + 7); g.stroke();
+
+  g.fillStyle = '#e5ecf6';
+  g.font = '12px system-ui';
+  g.textAlign = 'center';
+  g.fillText('▲ ÖN', ox, 14);
+}
+
+function openRobotEditor(open) {
+  $('robotEditor').classList.toggle('hidden', !open);
+  $('robotEditBtn').textContent = open ? 'Bağla' : 'Redaktə et';
+  if (open && robotSaved) {
+    robotDraft = clone(robotSaved.profile);
+    fillRobotForm(robotDraft);
+    showRobotResult(robotSaved);
+  }
+}
+
+$('robotEditBtn').addEventListener('click', () => openRobotEditor($('robotEditor').classList.contains('hidden')));
+$('robotReset').addEventListener('click', () => openRobotEditor(true));
+$('robotSave').addEventListener('click', async () => {
+  readRobotForm();
+  const ok = await ask('Robot quruluşu yadda saxlanılsın və tətbiq olunsun? Robot təxminən 20 saniyəlik ' +
+    'yenidən başlayacaq; hərəkətdədirsə dayanacaq.', { okLabel: 'Tətbiq et' });
+  if (!ok) return;
+  try {
+    const info = await robotRequest({ profile: robotDraft, save: true, apply: true });
+    if (info.errors.length) {
+      showRobotResult(info);
+      return;
+    }
+    robotSaved = { ...info };
+    $('robotSummary').textContent = robotSummary(info);
+    openRobotEditor(false);
+  } catch (e) {
+    toast('Yadda saxlamaq alınmadı', 'error');
+  }
+});
+window.addEventListener('resize', drawRobotPreview);
+buildRobotForm();
+loadRobot();
 
 setTool('view');
 updateRouteBar();

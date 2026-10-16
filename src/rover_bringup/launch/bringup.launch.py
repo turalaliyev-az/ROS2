@@ -3,19 +3,22 @@ import os
 
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, Command
+from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+from rover_bringup import profile as robot_profile
 
 
 # This robot's own units. Used when the device isn't plugged in yet at launch
 # (e.g. started at boot): motor_bridge keeps retrying and the lidar driver
 # respawns, so they connect as soon as the cable is in.
 ESP32_BY_ID = '/dev/serial/by-id/usb-1a86_USB_Single_Serial_5C4E000865-if00'
-LIDAR_BY_ID = '/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0'
+LIDAR_BY_ID = ('/dev/serial/by-id/'
+               'usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0')
 
 
 def _resolve_port(udev_link, by_id_glob, fallback):
@@ -29,6 +32,11 @@ def _resolve_port(udev_link, by_id_glob, fallback):
 def generate_launch_description():
     rover_bringup_share = get_package_share_directory('rover_bringup')
     xacro_path = os.path.join(rover_bringup_share, 'urdf', 'rover.urdf.xacro')
+    # The robot's dimensions and sensor positions (web panel -> ~/.rover/robot.yaml).
+    profile = robot_profile.load()
+    geometry = robot_profile.derive(profile)
+    lidar_mask = geometry['lidar_mask_native']
+    mask_default = 'true' if profile['lidar']['mask'] and lidar_mask else 'false'
 
     use_lidar = LaunchConfiguration('use_lidar')
     use_camera = LaunchConfiguration('use_camera')
@@ -50,11 +58,12 @@ def generate_launch_description():
         'lidar_port',
         default_value=_resolve_port('/dev/rover_lidar', '*CP2102*', LIDAR_BY_ID))
     declare_lidar_rear_crop = DeclareLaunchArgument(
-        'lidar_rear_crop', default_value='true',
-        description='Mask the 20 deg behind the lidar (only needed while something sits there)')
+        'lidar_rear_crop', default_value=mask_default,
+        description='Hide the lidar sector set in the robot profile (a part of the robot in view)')
 
     robot_description = ParameterValue(
-        Command(['xacro ', xacro_path]), value_type=str)
+        Command(['xacro ', xacro_path, ' ', ' '.join(robot_profile.xacro_args(profile))]),
+        value_type=str)
 
     robot_state_publisher_node = Node(
         package='robot_state_publisher',
@@ -74,16 +83,20 @@ def generate_launch_description():
         parameters=[{
             'serial_port': esp32_port,
             'baud_rate': 115200,
-            'wheel_diameter_m': 0.09022,
-            'wheel_separation_m': 0.44,
-            'ticks_per_rev_left': 74,
-            'ticks_per_rev_right': 73,
-            # Hard cap per wheel, above anything Nav2 asks for (0.2 m/s +
-            # 0.5 rad/s turn = 0.31 m/s on the outer wheel); mainly limits
-            # teleop, whose default speed is 0.5 m/s.
-            'max_wheel_speed_mps': 0.35,
-            'max_linear_accel_mps2': 0.3,
-            'max_linear_decel_mps2': 1.0,
+            'wheel_diameter_m': profile['drive']['wheel_diameter'],
+            # Track times the skid-steer slip factor: what the wheels act like in a turn.
+            'wheel_separation_m': geometry['wheel_separation_cmd'],
+            'ticks_per_rev_left': profile['drive']['ticks_per_rev_left'],
+            'ticks_per_rev_right': profile['drive']['ticks_per_rev_right'],
+            'reverse_drive': profile['drive']['reversed'],
+            # Hard cap per wheel: the profile's max_speed (5 km/h by default)
+            # plus the fastest turn on the outer wheel, so neither the web
+            # panel nor Nav2 is ever cut; it stops anything else (teleop's
+            # 0.5 m/s default, a typo) from going faster. Speed-up and
+            # braking match Nav2's velocity_smoother (profile.ACCEL / DECEL).
+            'max_wheel_speed_mps': geometry['wheel_speed_cap'],
+            'max_linear_accel_mps2': robot_profile.ACCEL,
+            'max_linear_decel_mps2': robot_profile.DECEL,
             'max_angular_accel_rps2': 1.0,
             'max_angular_decel_rps2': 2.0,
             # ekf_node owns odom->base_footprint and publishes the fused /odom;
@@ -116,15 +129,11 @@ def generate_launch_description():
             'port_name': lidar_port,
             'port_baudrate': 230400,
             'laser_scan_dir': True,
-            # Something carried on the robot (probably the laptop) showed up at
-            # a fixed ~0.46 m directly behind (published /scan 170-180 deg).
-            # Turn this off when nothing sits there, so the rear isn't blind.
-            # The crop compares the lidar's native clockwise angle, and
-            # laser_scan_dir mirrors it (published = 360 - native), so native
-            # 175-195 is what masks published 165-185.
+            # The sector set in the robot profile, converted there to the
+            # driver's own clockwise angles (published = 360 - native).
             'enable_angle_crop_func': lidar_rear_crop,
-            'angle_crop_min': 175.0,
-            'angle_crop_max': 195.0,
+            'angle_crop_min': lidar_mask[0] if lidar_mask else 175.0,
+            'angle_crop_max': lidar_mask[1] if lidar_mask else 195.0,
         }],
         condition=IfCondition(use_lidar),
     )
@@ -156,6 +165,18 @@ def generate_launch_description():
         condition=IfCondition(use_camera),
     )
 
+    # People, chairs and tables (YOLO on the GPU). Always started, camera or
+    # not: its /perception/people_cloud is a collision monitor source, and a
+    # source that goes silent makes the collision monitor stop the robot.
+    detector_node = Node(
+        package='rover_perception',
+        executable='detector',
+        name='object_detector',
+        output='screen',
+        respawn=True,
+        respawn_delay=3.0,
+    )
+
     ld = LaunchDescription()
     ld.add_action(declare_use_lidar)
     ld.add_action(declare_use_camera)
@@ -167,6 +188,7 @@ def generate_launch_description():
     ld.add_action(ekf_node)
     ld.add_action(ldlidar_node)
     ld.add_action(depth_to_scan_node)
+    ld.add_action(detector_node)
 
     try:
         realsense_share = get_package_share_directory('realsense2_camera')
@@ -192,6 +214,9 @@ def generate_launch_description():
                 # goals responsive.
                 'decimation_filter.enable': 'true',
                 'decimation_filter.filter_magnitude': '3',
+                # Object recognition looks at ~8 frames/s; 15 instead of 30
+                # halves the raw colour traffic (~14 MB/s instead of 27).
+                'rgb_camera.color_profile': '640,480,15',
             }.items(),
             condition=IfCondition(use_camera),
         )

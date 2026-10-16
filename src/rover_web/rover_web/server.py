@@ -6,6 +6,7 @@ is embedded in the QR code shown on the robot's own screen (/qr, localhost
 only), so other devices on the same Wi-Fi can't drive the robot.
 """
 import asyncio
+from datetime import datetime
 import glob
 import io
 import json
@@ -16,18 +17,21 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
 
+from aiohttp import web, WSMsgType
+from ament_index_python.packages import get_package_share_directory
 import numpy as np
+from PIL import Image
 import qrcode
 import qrcode.image.svg
 import rclpy
-from aiohttp import web, WSMsgType
-from ament_index_python.packages import get_package_share_directory
-from PIL import Image
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.signals import SignalHandlerOptions
 
+from rover_bringup import profile as robot_profile
+from rover_web import scan_match, table_finder
+from rover_web.approach import TableApproach
+from rover_web.goal_check import goal_problem
 from rover_web.processes import ProcessManager
 from rover_web.ros_side import MANUAL_MAX_TURN, RosSide
 from rover_web.store import Store, valid_name
@@ -36,10 +40,12 @@ STATIC_DIR = os.path.join(get_package_share_directory('rover_web'), 'static')
 SEED_MAP = os.path.join(get_package_share_directory('rover_bringup'), 'maps',
                         'restaurant_map_v2.yaml')
 COOKIE = 'rover_key'
-NAV_SPEED_RANGE = (0.08, 0.3)
-MANUAL_SPEED_RANGE = (0.05, 0.3)
+# Slowest settings of the speed sliders; the top is the robot profile's
+# max_speed (5 km/h by default), the same for manual and autonomous driving.
+NAV_SPEED_MIN = 0.08     # m/s: the loaded wheels stick-slip below this
+MANUAL_SPEED_MIN = 0.05  # m/s
 
-QR_PAGE = '''<!doctype html>
+QR_PAGE = """<!doctype html>
 <html lang="az"><head><meta charset="utf-8"><title>Rover</title>
 <style>
 body{margin:0;height:100vh;display:flex;flex-direction:column;align-items:center;
@@ -77,7 +83,8 @@ async function poll() {
     $('urls').textContent = s.urls.join('  ·  ');
     const [stateText, color] = STATES[s.mode_state] || ['', '#94a3b8'];
     $('status').innerHTML =
-      `<b style="color:${color}">${MODES[s.mode] || s.mode}${stateText ? ' · ' + stateText : ''}</b><br>` +
+      `<b style="color:${color}">${MODES[s.mode] || s.mode}` +
+      `${stateText ? ' · ' + stateText : ''}</b><br>` +
       SENSORS.map(([k, label]) => `<span class="${s.sensors[k] ? 'on' : 'off'}">●</span> ${label}`)
              .join(' &nbsp; ');
   } catch (e) {
@@ -91,7 +98,7 @@ async function poll() {
 poll();
 setInterval(poll, 3000);
 </script></body></html>
-'''
+"""
 
 
 def lan_ips():
@@ -162,7 +169,7 @@ def encode_camera(msg, kind, max_width=640):
 
 
 def read_battery():
-    """The PC's own battery: {'percent', 'plugged'}, or None without one."""
+    """Read the PC's own battery: {'percent', 'plugged'}, or None without one."""
     override = os.environ.get('ROVER_BATTERY_DIR')  # tests point this at fake files
     for d in [override] if override else sorted(glob.glob('/sys/class/power_supply/BAT*')):
         try:
@@ -175,6 +182,15 @@ def read_battery():
         # "Not charging"/"Full"/"Unknown" also mean the charger is connected.
         return {'percent': percent, 'plugged': status != 'Discharging'}
     return None
+
+
+def in_rover_service():
+    """Tell whether this runs inside the `rover` systemd unit (so it can restart itself)."""
+    try:
+        with open('/proc/self/cgroup') as f:
+            return 'rover.service' in f.read()
+    except OSError:
+        return False
 
 
 def clamp(value, lo, hi):
@@ -199,13 +215,31 @@ class Controller:
         self.joy_time = 0.0
         self.driving = False
         self.saved_pose = None
+        self.loc_task = None
+        self._loc_field = (None, None)   # (map_version, scan_match.MapField)
         self.clients = set()
         self._map_png_cache = (None, b'')
         self._camera_cache = {}      # kind -> (Image msg, jpeg)
+        # Robot profile (dimensions, sensor poses): `robot` is what is saved,
+        # `robot_running` what the running launch files were started with.
+        self.robot = robot_profile.load()
+        self.robot_running = self.robot
+        self.robot_geometry = robot_profile.derive(self.robot)
         self.explore_when_ready = False
         self.battery = read_battery()
         self.auto_home_level = None  # battery % at the last automatic trip home
-        ros.nav_speed = store.settings['nav_speed']
+        # A saved speed above a since-lowered max_speed is used as the max.
+        ros.nav_speed = clamp(store.settings['nav_speed'], *self.speed_range(NAV_SPEED_MIN))
+        # Object recognition: table candidates for the current map (or the
+        # mapping session), and the camera-guided approach at a table.
+        self.loop = None
+        self.cand_key = store.settings['active_map']
+        self.candidates = store.candidates(self.cand_key)
+        self.cand_saved = time.monotonic()
+        self.cand_dirty = False
+        self.approach = TableApproach(ros, store, self._robot_front)
+        self.pending_table = None
+        ros.on_table_arrived = self._table_arrived
 
     # ---------------- modes ----------------
 
@@ -217,6 +251,12 @@ class Controller:
         self.ros.cancel_everything()
         self.explorer_on = False
         self.explore_when_ready = explore and mode == 'mapping'
+        self.approach.cancel()
+        self._switch_candidates(
+            '__mapping__' if mode == 'mapping' else self.store.settings['active_map'],
+            fresh=mode == 'mapping')
+        self.ros.monitor_state = (0, '')
+        self.ros.tuned_speed = None  # a new controller_server: tune it again
         self.mode, self.mode_state = mode, 'waiting' if mode != 'idle' else 'idle'
         await asyncio.to_thread(self.procs.stop, 'explorer')
         await asyncio.to_thread(self.procs.stop, 'navigation')
@@ -236,7 +276,8 @@ class Controller:
             self.mode_task = asyncio.create_task(self._bring_up_mapping())
 
     async def _wait_for_base(self):
-        """Hold off until the motor board and the lidar are talking.
+        """
+        Hold off until the motor board and the lidar are talking.
 
         Nav2 and slam_toolbox give up if odometry or scans are missing while
         they start, and the robot's electronics may be powered after the PC.
@@ -246,7 +287,8 @@ class Controller:
         self.mode_state = 'starting'
 
     async def _start_and_wait(self, name, cmd, ready, attempts=2, timeout=60.0):
-        """Start a mode's processes and wait until ready() says so.
+        """
+        Start a mode's processes and wait until ready() says so.
 
         Nav2's lifecycle bring-up occasionally loses a race with service
         discovery under load and aborts; a second start almost always works.
@@ -290,13 +332,115 @@ class Controller:
         cmd = ['ros2', 'launch', 'rover_bringup', 'nav2.launch.py',
                f'map:={self.store.map_yaml(map_name)}']
         if await self._start_and_wait('navigation', cmd, ready):
+            # The saved pose may be stale (robot pushed while off, pose saved
+            # while AMCL drifted): check it against the scan, else search the map.
+            self.mode_state = 'localizing'
+            hint = (pose['x'], pose['y'], pose['yaw']) if self.loc_confirmed else None
+            found = await self._scan_localize(hint)
             self.mode_state = 'ready'
-            self.ros.event('info', 'Naviqasiya hazırdır' if self.loc_confirmed else
-                           'Naviqasiya hazırdır, amma mövqe məlum deyil: xəritədə təyin edin')
+            if found and found['trusted']:
+                self._apply_localization(found)
+                moved = math.hypot(found['x'] - pose['x'], found['y'] - pose['y'])
+                self.ros.event('info', 'Naviqasiya hazırdır, mövqe skanla təsdiqləndi'
+                               if hint and moved < 0.3 else
+                               f'Naviqasiya hazırdır, mövqe skanla tapıldı '
+                               f'({found["x"]:.2f}, {found["y"]:.2f})')
+            elif hint and found and found['hint_hits'] >= 0.5:
+                self.ros.event('warn', 'Naviqasiya hazırdır; saxlanmış mövqe skanla tam '
+                               'təsdiqlənmədi, xəritədə yoxlayın')
+            else:
+                self.loc_confirmed = False
+                self.ros.event('warn', 'Naviqasiya hazırdır, amma mövqe məlum deyil: '
+                               'xəritədə təyin edin və ya "Mövqeyi tap" basın')
             return
         self.mode_state = 'error'
         self.ros.event('error', 'Naviqasiya başlamadı. "Naviqasiyanı yenidən başlat" basın. '
                        'Loq: ~/.rover/logs/navigation.log')
+
+    # ---------------- localization from the scan ----------------
+
+    async def _scan_localize(self, hint=None):
+        """
+        Find the robot on the map from the lidar alone (scan_match).
+
+        The whole map is searched; hint (x, y, yaw), e.g. the saved pose,
+        only settles look-alike places. Returns scan_match.localize_near's
+        dict carried forward to where the robot is now, plus 'hint_hits'
+        (how well the hint itself fits), or None.
+        """
+        ros = self.ros
+        # merged scans smear while the robot moves: wait (briefly) for it to stand
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and (abs(ros.velocity[0]) > 0.02
+                                               or abs(ros.velocity[1]) > 0.05):
+            await asyncio.sleep(0.1)
+        since = time.monotonic()
+        got = None
+        deadline = since + 3.0
+        while time.monotonic() < deadline and (got is None or got[1] < 10):
+            await asyncio.sleep(0.1)
+            got = ros.lidar_points(since)
+        odom_then = ros.odom_pose()
+        with ros.lock:
+            msg, version = ros.map_msg, ros.map_version
+        if got is None or msg is None:
+            return None
+        pts = scan_match.thin(got[0])
+        clearance = max(0.15, self.robot_geometry['inscribed_radius'] - 0.05)
+
+        def search():
+            if self._loc_field[0] != version:
+                info = msg.info
+                self._loc_field = (version, scan_match.MapField(
+                    info.resolution, info.width, info.height,
+                    info.origin.position.x, info.origin.position.y, msg.data))
+            field = self._loc_field[1]
+            found = scan_match.localize_near(field, pts, hint, clearance)
+            if found:
+                found['hint_hits'] = field.hit_ratio(*hint, pts) if hint else 0.0
+            return found
+
+        try:
+            found = await asyncio.to_thread(search)
+        except Exception as e:  # noqa: B902 - localization must never stop navigation
+            print(f'scan localization failed: {e!r}', file=sys.stderr, flush=True)
+            return None
+        odom_now = ros.odom_pose()
+        if found and odom_then and odom_now:
+            found['x'], found['y'], found['yaw'] = scan_match.carry(
+                (found['x'], found['y'], found['yaw']),
+                (odom_then['x'], odom_then['y'], odom_then['yaw']),
+                (odom_now['x'], odom_now['y'], odom_now['yaw']))
+        if found:
+            print(f'scan localization: x {found["x"]:.2f} y {found["y"]:.2f} '
+                  f'yaw {math.degrees(found["yaw"]):.0f} hits {found["hits"]:.2f} '
+                  f'margin {found["margin"]:.3f} trusted {found["trusted"]} '
+                  f'by_hint {found["by_hint"]} '
+                  f'hint_hits {found["hint_hits"]:.2f}', file=sys.stderr, flush=True)
+        return found
+
+    def _apply_localization(self, found):
+        self.ros.set_initial_pose(found['x'], found['y'], found['yaw'], 0.1, math.radians(5))
+        self.loc_confirmed = True
+
+    async def _relocalize(self):
+        """Operator's "find my position": the scan first, turning in place only if that fails."""
+        self.ros.event('info', 'Mövqe skanla axtarılır…')
+        self.mode_state = 'localizing'
+        try:
+            found = await self._scan_localize()
+        finally:
+            if self.mode == 'navigation' and self.mode_state == 'localizing':
+                self.mode_state = 'ready'
+        if self.mode != 'navigation' or self.mode_state != 'ready':
+            return
+        if found and found['trusted']:
+            self._apply_localization(found)
+            self.ros.event('info', f'Mövqe tapıldı: ({found["x"]:.2f}, {found["y"]:.2f})')
+        else:
+            self.ros.event('warn', 'Skanla tapılmadı: yerində dönərək axtarılır')
+            self.ros.relocalize()
+            self.loc_confirmed = True
 
     async def _bring_up_mapping(self):
         await self._wait_for_base()
@@ -355,6 +499,8 @@ class Controller:
             # The robot is exactly here in the new map; navigation can start
             # already localized instead of asking for a position.
             self.store.save_last_pose(name, pose['x'], pose['y'], pose['yaw'])
+        # Tables the camera found while mapping belong to this map now.
+        self.store.save_candidates(name, self.candidates)
         self.ros.event('info', f'Xəritə saxlanıldı: {name}')
         if activate:
             self.store.set('active_map', name)
@@ -368,7 +514,8 @@ class Controller:
 
     def at_home(self):
         home, pose = self.home(), self.ros.robot_pose()
-        return bool(home and pose and math.hypot(pose['x'] - home['x'], pose['y'] - home['y']) < 0.3)
+        return bool(home and pose
+                    and math.hypot(pose['x'] - home['x'], pose['y'] - home['y']) < 0.3)
 
     def go_home(self):
         if self.mode != 'navigation' or self.mode_state != 'ready':
@@ -415,7 +562,8 @@ class Controller:
         while True:
             fresh = time.monotonic() - self.joy_time < 0.4
             if fresh:
-                v = self.joy[1] * self.store.settings['manual_speed']
+                v = self.joy[1] * clamp(self.store.settings['manual_speed'],
+                                        *self.speed_range(MANUAL_SPEED_MIN))
                 w = -self.joy[0] * MANUAL_MAX_TURN
                 self.ros.drive(v, w)
                 self.driving = True
@@ -430,6 +578,10 @@ class Controller:
             await asyncio.sleep(2.0)
             self.battery = read_battery()
             self._check_auto_home()
+            if self.ros.drive_fault is not None and self.explorer_on:
+                # A stopped drive can't explore; the explorer would keep sending goals.
+                self.explorer_on = False
+                await asyncio.to_thread(self.procs.stop, 'explorer')
             if self.explorer_on and self.ros.explore_status == 'done':
                 self.explorer_on = False
                 await asyncio.to_thread(self.procs.stop, 'explorer')
@@ -479,6 +631,7 @@ class Controller:
                         'ox': info.origin.position.x, 'oy': info.origin.position.y}
         pose = ros.robot_pose()
         active = self.store.settings['active_map']
+        named_tables = self.store.tables(active) if self.mode != 'mapping' else {}
         return {
             't': 'state',
             'mode': self.mode, 'mode_state': self.mode_state,
@@ -492,18 +645,157 @@ class Controller:
             'velocity': [round(ros.velocity[0], 2), round(ros.velocity[1], 2)],
             'speed': {'nav': self.store.settings['nav_speed'],
                       'manual': self.store.settings['manual_speed'],
-                      'nav_range': NAV_SPEED_RANGE, 'manual_range': MANUAL_SPEED_RANGE},
+                      'nav_range': self.speed_range(NAV_SPEED_MIN),
+                      'manual_range': self.speed_range(MANUAL_SPEED_MIN)},
             'map': map_meta,
             'active_map': active,
             'maps': self.store.list_maps(),
-            'tables': self.store.tables(active) if self.mode != 'mapping' else {},
+            'tables': named_tables,
+            'objects': (ros.latest_objects() or {}).get('objects', []),
+            'perception': {'status': ros.perception_status,
+                           'people_guard': self.store.settings['people_guard'],
+                           'table_approach': self.store.settings['table_approach'],
+                           'table_gap': self.store.settings['table_gap']},
+            'people': self._people_state(),
+            'candidates': [{k: round(c[k], 2) if isinstance(c[k], float) else c[k]
+                            for k in ('id', 'x', 'y', 'r', 'n')}
+                           for c in table_finder.offered(self.candidates, named_tables)],
             'home': self.home() if self.mode != 'mapping' else None,
             'battery': self.battery,
             'auto_home': {'on': self.store.settings['auto_home'],
                           'level': self.store.settings['auto_home_level']},
             'explore_pending': self.explore_when_ready,
             'scan': ros.scan_points('map'),
+            'robot': {'footprint': self.robot_geometry['footprint'],
+                      'wheels': self.robot_geometry['wheels'],
+                      'wheel_radius': self.robot_geometry['wheel_radius'],
+                      'wheel_width': self.robot['drive']['wheel_width'],
+                      'pending_restart': self.robot != self.robot_running},
         }
+
+    # ---------------- object recognition ----------------
+
+    def _people_state(self):
+        """Say what the collision monitor is doing about people: '', 'slow' or 'wait'."""
+        action, polygon = self.ros.monitor_state
+        if not polygon.startswith('People'):
+            return ''
+        # CollisionMonitorState action_type: 1 stop, 2 slowdown, 3 approach, 4 limit.
+        return 'wait' if action in (1, 3, 4) else 'slow' if action == 2 else ''
+
+    def _switch_candidates(self, key, fresh=False):
+        if self.cand_dirty:
+            self.store.save_candidates(self.cand_key, self.candidates)
+        self.cand_key = key
+        self.candidates = [] if fresh else self.store.candidates(key)
+        self.cand_dirty = fresh
+
+    def _goal_problem(self, x, y):
+        """Say why the robot can't go to (x, y) on the loaded map; None if it can (or no map)."""
+        with self.ros.lock:
+            grid = self.ros.map_msg
+        if grid is None or self.mode != 'navigation':
+            return None
+        info = grid.info
+        # The robot's half-length without the safety padding: closer than that
+        # to a wall, its centre can't be there at all.
+        clearance = self.robot_geometry['inscribed_radius'] - self.robot['safety']['padding']
+        return goal_problem(info.resolution, info.width, info.height, info.origin.position.x,
+                            info.origin.position.y, grid.data, x, y, clearance)
+
+    def speed_range(self, lowest):
+        """Get a speed slider's (min, max): max is the running stack's max_speed."""
+        return (lowest, self.robot_running['drive']['max_speed'])
+
+    def _robot_front(self):
+        """Robot front (without the safety padding), in metres ahead of the rotation centre."""
+        front = max(x for x, _ in self.robot_geometry['footprint'])
+        return front - self.robot['safety']['padding']
+
+    async def perception_loop(self):
+        """Collect table sightings into candidates; save them now and then."""
+        state = {'last': None}
+        while True:
+            await asyncio.sleep(0.25)
+            try:
+                self._collect_tables(state)
+            except Exception as exc:  # noqa: BLE001 - one bad message must not end collection
+                self.ros.get_logger().error(f'table candidates: {exc!r}')
+
+    def _collect_tables(self, state):
+        if self.cand_dirty and time.monotonic() - self.cand_saved > 10.0:
+            table_finder.prune(self.candidates, time.time())
+            self.store.save_candidates(self.cand_key, self.candidates)
+            self.cand_dirty = False
+            self.cand_saved = time.monotonic()
+        objs = self.ros.latest_objects()
+        if not objs or objs.get('t') == state['last'] or self.mode_state != 'ready':
+            return
+        state['last'] = objs.get('t')
+        with self.ros.lock:
+            amcl = dict(self.ros.amcl) if self.ros.amcl else None
+        if self.mode == 'navigation' and (amcl is None or amcl['std_xy'] > 0.3):
+            return  # not sure where we are: positions would be wrong
+        robot = self.ros.robot_pose()
+        if robot is None:
+            return
+        for o in objs.get('objects', []):
+            if o['cls'] != 'table' or 'map' not in o or o.get('dist', 9.0) > 3.0:
+                continue
+            center, radius = table_finder.table_center(o['map'], (robot['x'], robot['y']),
+                                                       o.get('width', 0.8))
+            next_id = max((c['id'] for c in self.candidates), default=0) + 1
+            table_finder.add_sighting(self.candidates, center, radius,
+                                      (robot['x'], robot['y']), next_id, time.time())
+            self.cand_dirty = True
+
+    def _table_arrived(self, _label):
+        """Hand a table goal Nav2 reached to the camera-guided approach (from the ROS thread)."""
+        name, seq = self.pending_table, self.approach.seq
+        if self.loop is None:
+            self.ros.clear_destination()
+            self.ros.event('info', f'Çatdı: Masa {name}')
+            return
+        self.loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(self.approach.run(name, seq)))
+
+    # ---------------- robot profile ----------------
+
+    def robot_info(self, profile, errors=()):
+        d = robot_profile.derive(profile)
+        keys = ('footprint', 'wheels', 'wheel_radius', 'size', 'inscribed_radius',
+                'circumscribed_radius', 'inflation_radius', 'lidar', 'camera')
+        return {'profile': profile, 'errors': list(errors),
+                'derived': {k: d[k] for k in keys},
+                'pending_restart': self.robot != self.robot_running,
+                'can_restart': in_rover_service()}
+
+    def update_robot(self, data, save, apply):
+        """Validate (preview), optionally save, optionally restart to apply."""
+        profile, errors = robot_profile.validate(data)
+        if errors or not save:
+            return self.robot_info(profile, errors)
+        robot_profile.save(profile)
+        self.robot = profile
+        self.robot_geometry = robot_profile.derive(profile)
+        self.ros.event('info', 'Robot quruluşu yadda saxlanıldı')
+        if apply:
+            self.restart_robot()
+        return self.robot_info(profile)
+
+    def restart_robot(self):
+        """Restart the whole stack so launch files pick up the new profile."""
+        if not in_rover_service():  # e.g. started by hand from a terminal
+            self.ros.event('warn', 'Tətbiq etmək üçün sistemi əl ilə yenidən başladın')
+            return
+        self.ros.cancel_everything()
+        for _ in range(3):
+            self.ros.drive(0.0, 0.0)
+        self.ros.event('warn', 'Robot yenidən başladılır (~20 saniyə)…')
+        # --no-block: systemd queues the restart (which stops this process
+        # too); the delay lets the event above reach the browsers first.
+        asyncio.get_running_loop().call_later(1.0, lambda: subprocess.Popen(
+            ['systemctl', '--user', '--no-block', 'restart', 'rover'], start_new_session=True))
 
     def camera_jpeg(self, kind):
         self.ros.want_camera(kind)
@@ -548,6 +840,15 @@ class Controller:
         name = cmd.get('cmd')
         ros = self.ros
         tables_map = self.store.settings['active_map']
+        moving_joy = name == 'joy' and (abs(float(cmd.get('x', 0))) > 0.05
+                                        or abs(float(cmd.get('y', 0))) > 0.05)
+        if moving_joy or name in ('stop', 'goto', 'goto_table', 'route', 'route_tables', 'home_go',
+                                  'set_pose', 'relocalize', 'mode', 'restart', 'explore'):
+            self.approach.cancel()
+        if self.mode_state == 'localizing' and \
+                name in ('goto', 'goto_table', 'route', 'route_tables', 'home_go'):
+            ros.event('warn', 'Mövqe yoxlanılır: bir neçə saniyə gözləyin')
+            return
 
         if name == 'joy':
             x, y = clamp(cmd.get('x', 0), -1, 1), clamp(cmd.get('y', 0), -1, 1)
@@ -569,15 +870,27 @@ class Controller:
                 await asyncio.to_thread(self.set_explorer, False)
         elif name == 'goto':
             x, y = float(cmd['x']), float(cmd['y'])
+            problem = self._goal_problem(x, y)
+            if problem:
+                ros.event('error', f'Hədəf qəbul edilmədi: ({x:.2f}, {y:.2f}) {problem}')
+                return
             yaw = float(cmd['yaw']) if cmd.get('yaw') is not None else ros.goal_yaw(x, y)
             ros.goto(x, y, yaw, cmd.get('label') or f'({x:.2f}, {y:.2f})')
         elif name == 'goto_table':
             t = self.store.tables(tables_map).get(cmd.get('name'))
             if t:
-                ros.goto(t['x'], t['y'], t['yaw'], f'Masa {cmd["name"]}')
+                self.pending_table = cmd['name']
+                ros.goto(t['x'], t['y'], t['yaw'], f'Masa {cmd["name"]}', kind='table')
         elif name == 'route':
-            points = [(float(p[0]), float(p[1]), None if len(p) < 3 or p[2] is None else float(p[2]))
+            points = [(float(p[0]), float(p[1]),
+                       None if len(p) < 3 or p[2] is None else float(p[2]))
                       for p in cmd.get('points', [])]
+            bad = [(k + 1, problem) for k, (x, y, _) in enumerate(points)
+                   if (problem := self._goal_problem(x, y))]
+            if bad:
+                k, problem = bad[0]
+                ros.event('error', f'Marşrut qəbul edilmədi: {k}-ci nöqtə {problem}')
+                return
             if points:
                 ros.route(points, int(cmd.get('loops', 0)), f'Marşrut ({len(points)} nöqtə)')
         elif name == 'route_tables':
@@ -595,16 +908,18 @@ class Controller:
             self.loc_confirmed = True
             ros.event('info', 'Mövqe təyin edildi')
         elif name == 'relocalize':
-            if self.mode == 'navigation':
-                ros.relocalize()
-                self.loc_confirmed = True
+            if self.mode == 'navigation' and self.mode_state == 'ready' and \
+                    not (self.loc_task and not self.loc_task.done()):
+                ros.cancel()
+                self.loc_task = asyncio.create_task(self._relocalize())
         elif name == 'speed':
             if 'nav' in cmd:
-                v = round(clamp(cmd['nav'], *NAV_SPEED_RANGE), 3)
+                v = round(clamp(cmd['nav'], *self.speed_range(NAV_SPEED_MIN)), 3)
                 self.store.set('nav_speed', v)
                 ros.nav_speed = v
             if 'manual' in cmd:
-                self.store.set('manual_speed', round(clamp(cmd['manual'], *MANUAL_SPEED_RANGE), 3))
+                self.store.set('manual_speed',
+                               round(clamp(cmd['manual'], *self.speed_range(MANUAL_SPEED_MIN)), 3))
         elif name == 'mode':
             if cmd.get('mode') in ('navigation', 'mapping', 'idle'):
                 await self.set_mode(cmd['mode'], explore=bool(cmd.get('explore')))
@@ -659,6 +974,30 @@ class Controller:
                 yaw = math.radians(float(cmd.get('yaw_deg') or 0.0))
             self.store.set_table(tables_map, tname, x, y, yaw)
             ros.event('info', f'Masa yadda saxlanıldı: {tname} ({x:.2f}, {y:.2f})')
+        elif name == 'perception':
+            if 'people_guard' in cmd:
+                self.store.set('people_guard', bool(cmd['people_guard']))
+                ros.set_people_guard(self.store.settings['people_guard'])
+            if 'table_approach' in cmd:
+                self.store.set('table_approach', bool(cmd['table_approach']))
+            if 'table_gap' in cmd:
+                self.store.set('table_gap', round(clamp(cmd['table_gap'], 0.05, 0.6), 3))
+        elif name == 'candidate_accept':
+            tname = str(cmd.get('name', '')).strip()
+            cand = next((c for c in self.candidates if c['id'] == cmd.get('id')), None)
+            if cand is None or not tname or len(tname) > 30 or self.mode != 'navigation':
+                ros.event('error', 'Masa saxlanılmadı (ad və naviqasiya rejimi lazımdır)')
+                return
+            x, y, yaw = table_finder.approach_pose(cand, self._robot_front())
+            self.store.set_table(tables_map, tname, x, y, yaw, center=(cand['x'], cand['y']))
+            self.candidates.remove(cand)
+            self.cand_dirty = True
+            ros.event('info', f'Masa yadda saxlanıldı: {tname}')
+        elif name == 'candidate_dismiss':
+            for c in self.candidates:
+                if c['id'] == cmd.get('id'):
+                    c['dismissed'] = True
+                    self.cand_dirty = True
         elif name == 'table_delete':
             tname = cmd.get('name')
             if tname in self.store.tables(tables_map):
@@ -699,6 +1038,19 @@ def build_app(ctrl):
             raise web.HTTPNotFound()
         return web.Response(body=png, content_type='image/png',
                             headers={'Cache-Control': 'no-store'})
+
+    async def robot_get(_request):
+        return web.json_response(ctrl.robot_info(ctrl.robot))
+
+    async def robot_post(request):
+        try:
+            body = await request.json()
+        except ValueError:
+            raise web.HTTPBadRequest()
+        if not isinstance(body, dict) or not isinstance(body.get('profile'), dict):
+            raise web.HTTPBadRequest(text='"profile" (object) required')
+        return web.json_response(ctrl.update_robot(
+            body.get('profile'), bool(body.get('save')), bool(body.get('apply'))))
 
     async def camera(request):
         kind = request.query.get('kind', 'color')
@@ -755,6 +1107,8 @@ def build_app(ctrl):
     app.router.add_get('/ws', ws_handler)
     app.router.add_get('/api/map.png', map_png)
     app.router.add_get('/api/camera.jpg', camera)
+    app.router.add_get('/api/robot', robot_get)
+    app.router.add_post('/api/robot', robot_post)
     app.router.add_get('/qr', qr_page)
     app.router.add_get('/qr.svg', qr_svg)
     app.router.add_get('/qr.json', qr_status)
@@ -766,7 +1120,10 @@ def build_app(ctrl):
 def main():
     rclpy.init(args=sys.argv, signal_handler_options=SignalHandlerOptions.NO)
     ros = RosSide()
-    executor = MultiThreadedExecutor(num_threads=4)
+    # Single-threaded: the callbacks are short and never block, and rclpy's
+    # MultiThreadedExecutor busy-spins (it took a whole core, starving Nav2's
+    # controller to 5-8 Hz; measured 122 % vs 21 % CPU for the same load).
+    executor = SingleThreadedExecutor()
     executor.add_node(ros)
     threading.Thread(target=executor.spin, daemon=True).start()
 
@@ -777,7 +1134,13 @@ def main():
     app = build_app(ctrl)
 
     async def on_startup(_app):
-        for coro in (ctrl.joystick_loop(), ctrl.broadcast_loop(), ctrl.housekeeping_loop()):
+        ctrl.loop = asyncio.get_running_loop()
+        ros.set_people_guard(store.settings['people_guard'])
+        # A destination left by a previous run (crash mid-trip) must not keep
+        # people near it hidden from the collision monitor.
+        ros.clear_destination()
+        for coro in (ctrl.joystick_loop(), ctrl.broadcast_loop(), ctrl.housekeeping_loop(),
+                     ctrl.perception_loop()):
             asyncio.create_task(coro)
 
         start_mode = ros.get_parameter('start_mode').value

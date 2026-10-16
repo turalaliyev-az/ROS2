@@ -16,13 +16,11 @@ def generate_launch_description():
     the operator picks in the browser.
     """
     rover_bringup_share = get_package_share_directory('rover_bringup')
-    lidar_rear_crop = LaunchConfiguration('lidar_rear_crop')
     web_port = LaunchConfiguration('web_port')
 
     bringup = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(rover_bringup_share, 'launch', 'bringup.launch.py')),
-        launch_arguments={'lidar_rear_crop': lidar_rear_crop}.items(),
     )
 
     web = Node(
@@ -39,7 +37,6 @@ def generate_launch_description():
     )
 
     ld = LaunchDescription()
-    ld.add_action(DeclareLaunchArgument('lidar_rear_crop', default_value='true'))
     ld.add_action(DeclareLaunchArgument('web_port', default_value='8080'))
     ld.add_action(bringup)
     ld.add_action(web)

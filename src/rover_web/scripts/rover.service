@@ -6,9 +6,12 @@ Description=Restaurant rover: motors, sensors, Nav2 and the web control panel
 [Service]
 Type=exec
 ExecStart=/bin/bash -c 'source /opt/ros/jazzy/setup.bash && source @WS@/install/setup.bash && exec ros2 launch rover_bringup robot.launch.py'
-# Every process in the unit gets SIGINT, exactly like Ctrl+C in a terminal:
-# motor_bridge sends a zero command before it closes the port.
+# SIGINT to ros2 launch only, exactly like Ctrl+C in a terminal: it passes it
+# on to each node once (motor_bridge sends a zero command before it closes the
+# port). Signalling every process too made nodes get it twice and die mid-cleanup.
+# Whatever is still running after TimeoutStopSec is killed.
 KillSignal=SIGINT
+KillMode=mixed
 TimeoutStopSec=30
 Restart=on-failure
 RestartSec=5

@@ -6,11 +6,16 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
+from rover_bringup import profile as robot_profile
+
 
 def generate_launch_description():
     rover_bringup_share = get_package_share_directory('rover_bringup')
     default_map = os.path.join(rover_bringup_share, 'maps', 'restaurant_map_v2.yaml')
-    default_params = os.path.join(rover_bringup_share, 'config', 'nav2_params.yaml')
+    # nav2_params.yaml with this robot's footprint and inflation (robot profile).
+    default_params = robot_profile.nav2_params(
+        robot_profile.load(), os.path.join(rover_bringup_share, 'config', 'nav2_params.yaml'),
+        robot_profile.generated_dir() / 'nav2_params.yaml')
 
     map_yaml = LaunchConfiguration('map')
     params_file = LaunchConfiguration('params_file')

@@ -7,6 +7,8 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from rover_bringup import profile as robot_profile
+
 
 def generate_launch_description():
     """SLAM plus Nav2's navigation servers (no AMCL/map_server): drive or explore while mapping."""
@@ -16,7 +18,11 @@ def generate_launch_description():
 
     declare_params = DeclareLaunchArgument(
         'params_file',
-        default_value=os.path.join(rover_bringup_share, 'config', 'nav2_params.yaml'))
+        # nav2_params.yaml with this robot's footprint and inflation (robot profile).
+        default_value=robot_profile.nav2_params(
+            robot_profile.load(),
+            os.path.join(rover_bringup_share, 'config', 'nav2_params.yaml'),
+            robot_profile.generated_dir() / 'nav2_params.yaml'))
 
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(

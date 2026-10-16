@@ -1,5 +1,5 @@
-import os
 from glob import glob
+import os
 
 from setuptools import find_packages, setup
 
@@ -20,6 +20,11 @@ setup(
     maintainer_email='tural.bozkurt999@gmail.com',
     description='Browser control panel for the restaurant rover',
     license='MIT',
+    extras_require={
+        'test': [
+            'pytest',
+        ],
+    },
     entry_points={
         'console_scripts': [
             'rover_web_server = rover_web.server:main',

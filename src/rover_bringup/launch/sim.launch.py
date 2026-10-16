@@ -2,9 +2,10 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, TimerAction
+from launch.actions import (DeclareLaunchArgument, GroupAction, IncludeLaunchDescription,
+                            TimerAction)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, Command
+from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node, SetParameter
 from launch_ros.descriptions import ParameterFile, ParameterValue
 from nav2_common.launch import RewrittenYaml
@@ -123,7 +124,18 @@ def generate_launch_description():
         ]
     )
 
+    # The collision monitor's "people" source must keep publishing or it stops
+    # the robot; without a camera the detector sends an empty cloud.
+    detector_node = Node(
+        package='rover_perception',
+        executable='detector',
+        name='object_detector',
+        output='screen',
+        parameters=[{'use_sim_time': True}],
+    )
+
     ld = LaunchDescription()
+    ld.add_action(detector_node)
     ld.add_action(declare_map)
     ld.add_action(declare_params)
     ld.add_action(declare_autostart)

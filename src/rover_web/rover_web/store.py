@@ -1,10 +1,10 @@
 """Persistent robot data under ~/.rover: maps, tables and home per map, settings, last pose."""
 import math
 import os
+from pathlib import Path
 import re
 import secrets
 import shutil
-from pathlib import Path
 
 import yaml
 
@@ -19,6 +19,9 @@ DEFAULT_SETTINGS = {
     'access_key': None,
     'auto_home': True,          # drive home when the PC battery runs low
     'auto_home_level': 20,      # percent
+    'people_guard': True,       # slow down near people, wait for them to pass
+    'table_approach': True,     # camera-guided final approach at a table
+    'table_gap': 0.20,          # m between robot front and table after it
 }
 
 
@@ -48,7 +51,8 @@ class Store:
         self.maps_dir = ROOT / 'maps'
         self.tables_dir = ROOT / 'tables'
         self.logs_dir = ROOT / 'logs'
-        for d in (self.maps_dir, self.tables_dir, self.logs_dir):
+        self.candidates_dir = ROOT / 'table_candidates'
+        for d in (self.maps_dir, self.tables_dir, self.logs_dir, self.candidates_dir):
             d.mkdir(parents=True, exist_ok=True)
 
         self._tables = {}
@@ -71,7 +75,7 @@ class Store:
     def save_settings(self):
         _save(self.settings_path, self.settings)
 
-    def set(self, key, value):
+    def set(self, key, value):  # noqa: A003 - store.set(key, value) reads well
         self.settings[key] = value
         self.save_settings()
 
@@ -108,10 +112,13 @@ class Store:
         _save(self.tables_dir / f'{map_name}.yaml', tables)
         self._tables[map_name] = tables
 
-    def set_table(self, map_name, name, x, y, yaw):
+    def set_table(self, map_name, name, x, y, yaw, center=None):
+        """(x, y, yaw): where the robot stops; center: the table itself, if known."""
         tables = self.tables(map_name)
         tables[name] = {'x': round(float(x), 3), 'y': round(float(y), 3),
                         'yaw': round(float(yaw), 3)}
+        if center is not None:
+            tables[name]['center'] = [round(float(center[0]), 3), round(float(center[1]), 3)]
         self._write_tables(map_name, tables)
         return tables
 
@@ -120,6 +127,15 @@ class Store:
         tables.pop(name, None)
         self._write_tables(map_name, tables)
         return tables
+
+    # ---------------- table candidates (found by the camera) ----------------
+
+    def candidates(self, map_name):
+        return _load(self.candidates_dir / f'{map_name}.yaml', []) if map_name else []
+
+    def save_candidates(self, map_name, candidates):
+        if map_name:
+            _save(self.candidates_dir / f'{map_name}.yaml', candidates)
 
     # ---------------- home (charging spot) ----------------
 

@@ -37,6 +37,7 @@
   <span id="navText"></span>
   <button id="navCancel" class="small danger">Ləğv et</button>
 </div>
+<div id="peopleBar" class="banner info hidden"></div>
 
 <main>
   <!-- ================= MAP ================= -->
@@ -63,6 +64,8 @@
       <div id="legend" class="legend">
         <span><i class="lg lidar"></i>Lidar</span>
         <span><i class="lg camera"></i>Kamera</span>
+        <span><i class="lg person"></i>İnsan</span>
+        <span><i class="lg table"></i>Masa</span>
       </div>
     </div>
     <div id="routeBar" class="routebar hidden">
@@ -83,6 +86,7 @@
       </div>
       <div class="cambox">
         <img id="camImg" alt="">
+        <canvas id="camOverlay" class="camoverlay"></canvas>
         <div id="camMsg" class="cammsg">Görüntü yüklənir…</div>
         <div id="depthScale" class="depthscale hidden"><span>yaxın</span><span>6 m+</span></div>
       </div>
@@ -100,6 +104,11 @@
 
   <!-- ================= TABLES ================= -->
   <section id="tab-tables" class="tab">
+    <div class="card hidden" id="candCard">
+      <h3>Kameranın tapdığı masalar</h3>
+      <p class="muted">Robot bu masaları bir neçə dəfə görüb. Ad verib saxlayın: robotun dayanacağı yer avtomatik hesablanır (masanın robotun gördüyü tərəfində, üzü masaya). Xəritədə sarı "?" ilə görünür.</p>
+      <div id="candList" class="list"></div>
+    </div>
     <div class="card">
       <h3>Robotun olduğu yeri masa kimi saxla</h3>
       <p class="muted">Robotu manual idarə ilə masanın yanına aparın, dayandırın və ad verin.</p>
@@ -192,9 +201,43 @@
       <p class="muted">Robot yerində iki dəfə dönərək xəritədə harada olduğunu axtarır. Ətraf boş olmalıdır.</p>
     </div>
     <div class="card">
+      <h3>Obyekt tanıma</h3>
+      <p>Vəziyyət: <b id="percText">—</b></p>
+      <label class="check"><input id="peopleGuard" type="checkbox"> İnsanlara diqqət: yaxında yavaşla, yolu kəsəndə gözlə</label>
+      <label class="check"><input id="tableApproach" type="checkbox"> Masaya kamera ilə dəqiq yanaş</label>
+      <label class="row">Masaya qədər məsafə <b id="tableGapVal"></b></label>
+      <input id="tableGap" type="range" min="5" max="60" step="5">
+      <p class="muted">Kamera insanları, stulları və masaları tanıyır. "Get" ilə masaya gedəndə robot sonda masanı kamerada tapıb üzünü ona çevirir və bu məsafədə dayanır.</p>
+    </div>
+    <div class="card">
       <h3>Sistem</h3>
       <p>Aktiv xəritə: <b id="activeMapText">—</b></p>
       <button id="restartBtn">Naviqasiyanı yenidən başlat</button>
+    </div>
+    <div class="card" id="robotCard">
+      <div class="row">
+        <h3>Robot quruluşu</h3>
+        <button id="robotEditBtn" class="small">Redaktə et</button>
+      </div>
+      <p id="robotSummary" class="muted">—</p>
+      <p id="robotPending" class="note hidden">Yadda saxlanılıb, amma hələ tətbiq olunmayıb: sistem yenidən başladılanda qüvvəyə minəcək.</p>
+      <div id="robotEditor" class="hidden">
+        <canvas id="robotPreview" class="robotpreview"></canvas>
+        <div class="plegend">
+          <span><i style="background:#ef4444"></i>kontur</span>
+          <span><i style="background:#3b82f6"></i>lidar</span>
+          <span><i style="background:#22c55e"></i>kamera</span>
+          <span><i style="background:#f59e0b"></i>dönmə mərkəzi</span>
+        </div>
+        <p class="muted small">Yuxarıdan görünüş, ön tərəf yuxarıdadır. Ölçülər platformanın mərkəzindən: x irəli, y sola. Qırmızı qırıq xətt robotun konturudur.</p>
+        <p id="robotDerived" class="derived"></p>
+        <div id="robotForm"></div>
+        <p id="robotErrors" class="errors hidden"></p>
+        <div class="row gap wrap">
+          <button id="robotSave" class="primary">Yadda saxla və tətbiq et</button>
+          <button id="robotReset">Ləğv et</button>
+        </div>
+      </div>
     </div>
   </section>
 </main>

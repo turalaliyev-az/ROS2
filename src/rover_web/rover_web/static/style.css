@@ -311,3 +311,31 @@ button.big { padding: 14px; font-size: 17px; font-weight: 600; }
 .toast.warn { border-color: var(--warn); }
 .toast.error { border-color: var(--bad); }
 @keyframes fade { 0%, 85% { opacity: 1; } 100% { opacity: 0; } }
+
+/* ---------- robot profile editor ---------- */
+#robotCard .row h3 { margin: 0; }
+.robotpreview {
+  display: block; width: 100%; height: 300px; margin: 10px 0 4px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+}
+.derived { font-size: 13px; margin: 6px 0 10px; }
+.errors { color: var(--bad); font-size: 13px; }
+.note { color: var(--warn); font-size: 13px; margin: 6px 0 0; }
+.fgroup { margin-bottom: 12px; }
+.fgroup h4 { margin: 8px 0 6px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+.fgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.field.wide { grid-column: 1 / -1; }
+.field.inline { flex-direction: row-reverse; justify-content: flex-end; align-items: center; gap: 10px; color: var(--text); }
+.field input[type=number], .field select {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+  padding: 9px 10px; width: 100%; color: var(--text); font: inherit; font-size: 15px;
+}
+.plegend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); }
+.plegend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+
+/* ---------- object recognition ---------- */
+.banner.info { background: #1d4ed8; color: #fff; }
+.camoverlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.lg.person { background: #f97316; border-radius: 50%; }
+.lg.table { background: #16a34a; }
