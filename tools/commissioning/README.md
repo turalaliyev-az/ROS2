@@ -1,7 +1,7 @@
 # Robotun istismara verilmə (commissioning) alətləri
 
 Mühərrik, odometriya və naviqasiya yoxlamaları üçün. ROS paketi deyil, colcon bu qovluğa
-toxunmur. Qeydlər `logs/` qovluğuna yazılır.
+toxunmur. Qeydlər `logs/` qovluğuna yazılır (git-ə düşmür).
 
 | Alət | Servis | Nə edir |
 |---|---|---|

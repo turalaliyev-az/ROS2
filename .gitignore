@@ -3,3 +3,9 @@ install/
 log/
 __pycache__/
 *.pyc
+
+# Commissioning: measurement logs and compiled simulator binaries stay local
+tools/commissioning/logs/
+tools/commissioning/firmware_sim/*
+!tools/commissioning/firmware_sim/*.c
+!tools/commissioning/firmware_sim/*.sh
