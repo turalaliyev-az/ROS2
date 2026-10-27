@@ -162,7 +162,35 @@ local_costmap:
       height: 6
       resolution: 0.05
       footprint: "[[0.297,0.375],[0.297,-0.375],[-0.297,-0.375],[-0.297,0.375]]"
-      plugins: ["obstacle_layer", "inflation_layer"]
+      plugins: ["obstacle_layer", "people_layer", "inflation_layer"]
+      people_layer:
+        # People from rover_perception as filled disks (0.35 m around each):
+        # the planner keeps that much room and goes round them, instead of
+        # the robot stopping and waiting. The clearing ring (marking off)
+        # wipes this layer around the robot before every update, so someone
+        # who walked away leaves no mark; customers at the destination are
+        # left out by the detector.
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: people people_clearing
+        people:
+          topic: /perception/people_obstacles
+          data_type: "PointCloud2"
+          marking: True
+          clearing: False
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          obstacle_max_range: 6.0
+          obstacle_min_range: 0.0
+        people_clearing:
+          topic: /perception/people_clearing
+          data_type: "PointCloud2"
+          marking: False
+          clearing: True
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          raytrace_max_range: 6.5
+          raytrace_min_range: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
@@ -208,7 +236,35 @@ global_costmap:
       footprint: "[[0.297,0.375],[0.297,-0.375],[-0.297,-0.375],[-0.297,0.375]]"
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer", "people_layer", "inflation_layer"]
+      people_layer:
+        # People from rover_perception as filled disks (0.35 m around each):
+        # the planner keeps that much room and goes round them, instead of
+        # the robot stopping and waiting. The clearing ring (marking off)
+        # wipes this layer around the robot before every update, so someone
+        # who walked away leaves no mark; customers at the destination are
+        # left out by the detector.
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: people people_clearing
+        people:
+          topic: /perception/people_obstacles
+          data_type: "PointCloud2"
+          marking: True
+          clearing: False
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          obstacle_max_range: 6.0
+          obstacle_min_range: 0.0
+        people_clearing:
+          topic: /perception/people_clearing
+          data_type: "PointCloud2"
+          marking: False
+          clearing: True
+          min_obstacle_height: 0.0
+          max_obstacle_height: 2.0
+          raytrace_max_range: 6.5
+          raytrace_min_range: 0.0
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -359,7 +415,7 @@ collision_monitor:
     source_timeout: 1.0
     base_shift_correction: True
     stop_pub_timeout: 2.0
-    polygons: ["FootprintApproach", "PeopleSlowdown", "PeopleStop"]
+    polygons: ["FootprintApproach", "PeopleSlowdown", "PeopleApproach"]
     FootprintApproach:
       type: "polygon"
       action_type: "approach"
@@ -372,54 +428,37 @@ collision_monitor:
       sources_names: ["scan"]
     # People come from rover_perception's detector as rings of points (person
     # radius 0.3 m); customers at the destination are already left out there.
-    # Half speed while anyone is within 1.5 m...
+    # Never faster than walking pace (0.4 m/s) while anyone is within 1.2 m:
+    # the robot keeps going round people, just not rushing past them. A cap,
+    # not a ratio, so at the usual 0.45 m/s it hardly slows at all. The
+    # turn rate is set from the robot profile (MAX_TURN_RATE).
     PeopleSlowdown:
       type: "circle"
-      radius: 1.5
-      action_type: "slowdown"
-      slowdown_ratio: 0.5
-      min_points: 1
-      visualize: False
-      enabled: True
-      sources_names: ["people"]
-    # ...and no driving forward while someone is in the zone just ahead: the
-    # robot waits for them to pass (turning in place is still allowed). If
-    # they stay, Nav2's recovery takes over after the progress timeout.
-    # Robot-wide, from the front edge to as far as the robot needs to stop
-    # from the speed it is commanded (reaction delay + braking at 1 m/s^2 +
-    # margin, never under 0.6 m): one polygon per speed band, picked by the
-    # commanded velocity. Points and depths come from the robot profile
-    # (profile.people_stop_depth); these match its defaults.
-    PeopleStop:
-      type: "velocity_polygon"
+      radius: 1.2
       action_type: "limit"
-      linear_limit: 0.0
+      linear_limit: 0.4
       angular_limit: 0.5
       min_points: 1
       visualize: False
       enabled: True
       sources_names: ["people"]
-      holonomic: False
-      velocity_polygons: ["slow", "medium", "fast"]
-      # Reversing, turning in place and up to 0.35 m/s.
-      slow:
-        points: "[[0.247,0.375],[0.897,0.375],[0.897,-0.375],[0.247,-0.375]]"
-        linear_min: -10.0
-        linear_max: 0.35
-        theta_min: -10.0
-        theta_max: 10.0
-      medium:
-        points: "[[0.247,0.375],[1.087,0.375],[1.087,-0.375],[0.247,-0.375]]"
-        linear_min: 0.35
-        linear_max: 0.8
-        theta_min: -10.0
-        theta_max: 10.0
-      fast:
-        points: "[[0.247,0.375],[1.967,0.375],[1.967,-0.375],[0.247,-0.375]]"
-        linear_min: 0.8
-        linear_max: 10.0
-        theta_min: -10.0
-        theta_max: 10.0
+    # ...and, as a last resort, keep 2 s of travel between the robot and
+    # anyone its current motion would run into: Nav2 simulates the commanded
+    # (v, w), so a robot curving away from someone is not held back, while
+    # someone stepping out right in front makes it brake to a stop. Normally
+    # the people layer of the costmaps has the planner go round people long
+    # before this. 2 s covers reacting and braking from any allowed speed
+    # (profile.PEOPLE_TIME_BEFORE_COLLISION).
+    PeopleApproach:
+      type: "polygon"
+      action_type: "approach"
+      footprint_topic: "/local_costmap/published_footprint"
+      time_before_collision: 2.0
+      simulation_time_step: 0.1
+      min_points: 1
+      visualize: False
+      enabled: True
+      sources_names: ["people"]
     observation_sources: ["scan", "people"]
     scan:
       type: "scan"

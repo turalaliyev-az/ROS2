@@ -2,8 +2,9 @@ import math
 
 import numpy as np
 import pytest
-from rover_perception.geometry import (depth_points, locate, person_rings, project,
-                                       quat_to_matrix, scale_intrinsics, transform)
+from rover_perception.geometry import (clearing_ring, depth_points, in_view, locate,
+                                       person_disks, person_rings, project, quat_to_matrix,
+                                       scale_intrinsics, transform)
 from rover_perception.tracker import Tracker
 
 # D435-like: depth 848x480 wide, colour 640x480 narrower, 1.5 cm apart.
@@ -135,3 +136,30 @@ def test_tracker_does_not_match_across_classes():
     person = {'cls': 'person', 'pos': (1.0, 0.0)}
     tr.update([person], now=0.1)
     assert person['id'] != chair['id']
+
+
+def test_person_disks_fill_the_radius_and_skip_the_destination():
+    pts = person_disks([(2.0, 1.0), (6.0, 0.0)], radius=0.5, spacing=0.1, height=0.5,
+                       exclude=(6.3, 0.0), exclusion_radius=1.2)
+    assert pts.dtype == np.float32 and np.allclose(pts[:, 2], 0.5)
+    d = np.hypot(pts[:, 0] - 2.0, pts[:, 1] - 1.0)
+    assert d.max() <= 0.5 + 1e-5          # only the first person, inside the radius
+    assert d.min() < 1e-5                  # centre included: a filled disk, not a ring
+    assert len(pts) > 70                   # ~pi * 5^2 points at 0.1 m
+    assert person_disks([], 0.5).shape == (0, 3)
+
+
+def test_clearing_ring_is_dense_enough_at_its_reach():
+    ring = clearing_ring(6.0, spacing=0.05)
+    assert np.allclose(np.hypot(ring[:, 0], ring[:, 1]), 6.0, atol=1e-4)
+    gaps = np.hypot(*(np.diff(ring[:, :2], axis=0).T))
+    assert gaps.max() <= 0.05 + 1e-6
+
+
+def test_in_view_checks_horizontal_field_and_range():
+    # optical frame: z forward, x right; camera looking along the robot's x axis
+    to_cam = (np.array([[0, -1, 0], [0, 0, -1], [1, 0, 0]], dtype=float), np.zeros(3))
+    assert in_view((2.0, 0.0, 0.3), *to_cam, K_COLOR, 640, 480)
+    assert not in_view((2.0, 3.0, 0.3), *to_cam, K_COLOR, 640, 480)   # far to the left
+    assert not in_view((-2.0, 0.0, 0.3), *to_cam, K_COLOR, 640, 480)  # behind
+    assert in_view((2.0, 0.0, 1.8), *to_cam, K_COLOR, 640, 480)       # head above the picture

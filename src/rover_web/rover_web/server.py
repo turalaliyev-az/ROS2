@@ -678,10 +678,12 @@ class Controller:
     def _people_state(self):
         """Say what the collision monitor is doing about people: '', 'slow' or 'wait'."""
         action, polygon = self.ros.monitor_state
-        if not polygon.startswith('People'):
-            return ''
         # CollisionMonitorState action_type: 1 stop, 2 slowdown, 3 approach, 4 limit.
-        return 'wait' if action in (1, 3, 4) else 'slow' if action == 2 else ''
+        if polygon.startswith('PeopleApproach') and action in (1, 3, 4):
+            return 'wait'  # heading into someone: braking while the path goes round them
+        if polygon.startswith('PeopleSlowdown') and action in (2, 4):
+            return 'slow'
+        return ''
 
     def _switch_candidates(self, key, fresh=False):
         if self.cand_dirty:

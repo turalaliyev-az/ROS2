@@ -17,6 +17,17 @@ Publishes
                             when empty or when the camera or model is missing:
                             the collision monitor stops the robot when one of
                             its sources goes silent.
+  /perception/people_obstacles  PointCloud2 in base_footprint: each person as
+                            a filled disk (social_radius, 0.35 m), for the people layer
+                            of both costmaps: the planner routes around people
+                            with that much room instead of the robot stopping
+                            for them. A person who walks out of the camera's
+                            view (the robot passing them) is remembered for
+                            memory_age; one in view but no longer seen is gone.
+  /perception/people_clearing   PointCloud2 in base_footprint: a dense ring at
+                            clearing_reach, a clearing-only source that wipes
+                            the people layer around the robot before each
+                            update, so people who left leave no marks behind.
   /perception/status        std_msgs/String (latched)
 Listens to
   /perception/destination   geometry_msgs/PoseStamped (latched), from the web
@@ -34,10 +45,12 @@ import time
 from geometry_msgs.msg import PoseStamped
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, qos_profile_sensor_data, QoSProfile, ReliabilityPolicy
-from rover_perception.geometry import (depth_points, locate, person_rings, project,
-                                       quat_to_matrix, scale_intrinsics, transform)
+from rover_perception.geometry import (clearing_ring, depth_points, in_view, locate,
+                                       person_disks, person_rings, project, quat_to_matrix,
+                                       scale_intrinsics, transform)
 from rover_perception.tracker import Tracker
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from std_msgs.msg import Bool, String
@@ -108,6 +121,13 @@ class Detector(Node):
         # ignores people.
         self.declare_parameter('destination_max_age', 300.0)
         self.declare_parameter('cloud_rate_hz', 10.0)
+        # Room the planner keeps around a person (from their middle), how long
+        # someone out of the camera's view is remembered, and how far the
+        # people layer is wiped each update.
+        # 0.35 m: body plus a little; the costmap inflation adds the rest.
+        self.declare_parameter('social_radius', 0.35)
+        self.declare_parameter('memory_age', 3.0)
+        self.declare_parameter('clearing_reach', 6.0)
         self.declare_parameter('color_topic', '/camera/camera/color/image_raw')
         self.declare_parameter('depth_topic', '/camera/camera/depth/image_rect_raw')
 
@@ -119,6 +139,9 @@ class Detector(Node):
         self.person_max_age = p('person_max_age').value
         self.goal_exclusion = p('goal_exclusion_radius').value
         self.destination_max_age = p('destination_max_age').value
+        self.social_radius = p('social_radius').value
+        self.memory_age = max(p('memory_age').value, self.person_max_age)
+        self.clearing = clearing_ring(p('clearing_reach').value, 0.05, RING_HEIGHT)
         color_topic = p('color_topic').value
         depth_topic = p('depth_topic').value
 
@@ -133,6 +156,7 @@ class Detector(Node):
         self.destination = None  # (PoseStamped, monotonic time received)
         self.guard = True
         self.status = ''
+        self.view = None         # (colour frame, K, width, height) of the last processed image
 
         self.create_subscription(Image, color_topic, self._on_color, qos_profile_sensor_data)
         self.create_subscription(Image, depth_topic, self._on_depth, qos_profile_sensor_data)
@@ -146,11 +170,14 @@ class Detector(Node):
 
         self.objects_pub = self.create_publisher(String, 'perception/objects', 10)
         self.cloud_pub = self.create_publisher(PointCloud2, 'perception/people_cloud', 10)
+        self.obstacles_pub = self.create_publisher(PointCloud2, 'perception/people_obstacles', 10)
+        self.clearing_pub = self.create_publisher(PointCloud2, 'perception/people_clearing', 10)
         self.status_pub = self.create_publisher(String, 'perception/status', LATCHED)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.tracker = Tracker(match_radius=0.6, max_age=self.person_max_age)
+        # Tracks live as long as the costmaps may remember a person.
+        self.tracker = Tracker(match_radius=0.6, max_age=self.memory_age)
 
         self.create_timer(1.0 / p('cloud_rate_hz').value, self._publish_cloud)
         self._set_status('loading')
@@ -278,6 +305,8 @@ class Detector(Node):
         stamp = color.header.stamp
         color_frame = color.header.frame_id
         k_color = self._intrinsics('color', w, h)
+        if k_color is not None:
+            self.view = (color_frame, k_color, w, h)
         pts = pixels = None
         if depth is not None and k_color is not None:
             k_depth = self._intrinsics('depth', depth.width, depth.height)
@@ -340,18 +369,44 @@ class Detector(Node):
         x, y, _ = transform(np.array([[p.x, p.y, 0.0]]), *to_odom)[0]
         return float(x), float(y)
 
+    def _seen_by_camera(self, x, y):
+        """Whether a person at (x, y) in odom would be in the camera's picture now."""
+        view = self.view
+        if view is None:
+            return False
+        frame, k, width, height = view
+        to_camera = self._tf(frame, 'odom')
+        return to_camera is not None and in_view((x, y, 0.3), *to_camera, k, width, height)
+
     def _publish_cloud(self):
-        # In odom, where the people are tracked: the collision monitor moves
-        # the points to the robot's pose at its own time.
         now = time.monotonic()
         with self.lock:
-            people = [(x, y) for x, y, seen in self.people if now - seen <= self.person_max_age]
+            tracked = list(self.people)
+        recent = [(x, y) for x, y, seen in tracked if now - seen <= self.person_max_age]
+        # Out of the camera's view (beside or behind the robot as it passes):
+        # still there as far as the planner is concerned, for memory_age.
+        remembered = recent + [(x, y) for x, y, seen in tracked
+                               if self.person_max_age < now - seen <= self.memory_age
+                               and not self._seen_by_camera(x, y)]
         if not self.guard:
-            people = []
-        exclude = self._destination_in_odom() if people else None
-        points = person_rings(people, self.person_radius, RING_POINTS, RING_HEIGHT,
-                              exclude, self.goal_exclusion)
-        self.cloud_pub.publish(make_cloud(points, 'odom', self.get_clock().now().to_msg()))
+            recent, remembered = [], []
+        exclude = self._destination_in_odom() if remembered else None
+        stamp = self.get_clock().now().to_msg()
+
+        # Collision monitor: in odom, where the people are tracked; it moves
+        # the points to the robot's pose at its own time.
+        rings = person_rings(recent, self.person_radius, RING_POINTS, RING_HEIGHT,
+                             exclude, self.goal_exclusion)
+        self.cloud_pub.publish(make_cloud(rings, 'odom', stamp))
+
+        # Costmaps: in base_footprint, as a costmap source measures range and
+        # raytraces from the cloud's frame origin, which must be the robot.
+        disks = person_disks(remembered, self.social_radius, 0.1, RING_HEIGHT,
+                             exclude, self.goal_exclusion)
+        to_base = self._tf('base_footprint', 'odom') if len(disks) else None
+        disks = transform(disks, *to_base) if to_base is not None else disks[:0]
+        self.clearing_pub.publish(make_cloud(self.clearing, 'base_footprint', stamp))
+        self.obstacles_pub.publish(make_cloud(disks, 'base_footprint', stamp))
 
 
 def main(args=None):
@@ -359,8 +414,8 @@ def main(args=None):
     node = Detector()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass  # Ctrl+C or the service stopping
     finally:
         node.destroy_node()
         rclpy.try_shutdown()

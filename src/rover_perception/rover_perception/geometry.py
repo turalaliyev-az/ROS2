@@ -107,6 +107,56 @@ def person_rings(people, radius, count=12, height=0.5, exclude=None, exclusion_r
     return np.concatenate(rings).astype(np.float32)
 
 
+def person_disks(people, radius, spacing=0.1, height=0.5, exclude=None, exclusion_radius=0.0):
+    """
+    Turn each person (x, y) into a filled disk of points `spacing` apart, `radius` across.
+
+    For the costmaps: the planner treats the whole disk as an obstacle, so the
+    path keeps that much room around a person. People closer than
+    `exclusion_radius` to `exclude` (x, y) are left out. Returns Nx3 float32.
+    """
+    steps = np.arange(-radius, radius + 1e-9, spacing)
+    gx, gy = np.meshgrid(steps, steps)
+    keep = gx * gx + gy * gy <= radius * radius + 1e-9
+    offsets = np.stack([gx[keep], gy[keep]], axis=1)
+    disks = []
+    for x, y in people:
+        if exclude is not None and math.hypot(x - exclude[0], y - exclude[1]) < exclusion_radius:
+            continue
+        disks.append(np.column_stack([offsets + (x, y), np.full(len(offsets), height)]))
+    if not disks:
+        return np.zeros((0, 3), dtype=np.float32)
+    return np.concatenate(disks).astype(np.float32)
+
+
+def clearing_ring(reach, spacing=0.05, height=0.5):
+    """
+    Get points on a circle of radius `reach` around the origin, at most `spacing` apart.
+
+    Raytraced from the robot by a clearing-only costmap source, they wipe
+    everything within `reach` in the people layer each update, before the
+    current people are marked again: nobody who has left stays behind.
+    """
+    count = max(8, int(math.ceil(2.0 * math.pi * reach / spacing)))
+    angles = 2.0 * math.pi * np.arange(count) / count
+    return np.stack([reach * np.cos(angles), reach * np.sin(angles),
+                     np.full(count, height)], axis=1).astype(np.float32)
+
+
+def in_view(point, rotation, translation, K, width, height, max_range=6.0):
+    """
+    Tell whether a point (camera-frame transform given) falls inside the camera's view.
+
+    Only the horizontal field of view and the range are checked: a low camera
+    sees a person's legs even when their head is above the picture.
+    """
+    p = np.asarray(rotation) @ np.asarray(point, dtype=float) + np.asarray(translation)
+    if not 0.3 < p[2] < max_range:
+        return False
+    u = K[0] * p[0] / p[2] + K[2]
+    return 0.0 <= u <= width
+
+
 def quat_to_matrix(x, y, z, w):
     """Rotation matrix of a unit quaternion."""
     return np.array([

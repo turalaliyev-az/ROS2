@@ -149,26 +149,40 @@ def test_nobody_around_full_command(monitor):
     assert w == pytest.approx(COMMAND[1], abs=0.01)
 
 
-def test_person_beside_halves_the_speed(monitor):
-    # 1 m to the left: inside the 1.5 m slowdown circle, outside the stop zone.
+def test_person_beside_caps_the_speed_at_walking_pace(monitor):
+    # 1 m to the left: inside the 1.2 m circle. A cap, not a ratio: a slow
+    # command passes untouched, a faster one is held to PEOPLE_NEAR_SPEED.
     v, w = monitor.measure(people=[(0.0, 1.0)])
-    assert v == pytest.approx(COMMAND[0] / 2, abs=0.01)
-    assert w == pytest.approx(COMMAND[1] / 2, abs=0.01)
+    assert v == pytest.approx(COMMAND[0], abs=0.01)
+    assert w == pytest.approx(COMMAND[1], abs=0.01)
+    v, _ = monitor.measure(people=[(0.0, 1.0)], command=MEDIUM)
+    assert v == pytest.approx(profile.PEOPLE_NEAR_SPEED, abs=0.01)
     assert any(s.polygon_name == 'PeopleSlowdown' for s in monitor.states)
 
 
-def test_person_ahead_no_driving_forward(monitor):
+def test_heading_into_someone_brakes(monitor):
+    # Their nearest edge 5 cm beyond the robot's front, straight ahead.
     front = profile.derive(profile.DEFAULT)['footprint'][0][0]
     v, _ = monitor.measure(people=[(front + 0.35, 0.0)])
-    assert abs(v) < 0.005
-    assert any(s.polygon_name == 'PeopleStop' for s in monitor.states)
+    assert abs(v) < 0.03
+    assert any(s.polygon_name == 'PeopleApproach' for s in monitor.states)
 
 
-def test_person_ahead_turning_in_place_allowed(monitor):
+def test_turning_in_place_beside_someone_is_not_held_back(monitor):
+    # 0.4 m beyond the front: the robot's corners can't reach them in a turn,
+    # so turning away (as the planner does to go round) goes ahead.
     front = profile.derive(profile.DEFAULT)['footprint'][0][0]
-    v, w = monitor.measure(people=[(front + 0.35, 0.0)], command=(0.0, 0.3))
+    v, w = monitor.measure(people=[(front + 0.7, 0.0)], command=(0.0, 0.3))
     assert abs(v) < 0.005
-    assert w > 0.1
+    assert w == pytest.approx(0.3, abs=0.02)
+
+
+def test_passing_someone_beside_the_path_is_not_held_back(monitor):
+    # Half a metre ahead and 0.8 m to the left: driving straight on misses
+    # them, so only the walking-pace cap could apply (0.3 m/s is under it).
+    front = profile.derive(profile.DEFAULT)['footprint'][0][0]
+    v, _ = monitor.measure(people=[(front + 0.5, 0.8)], command=(0.3, 0.0))
+    assert v == pytest.approx(0.3, abs=0.01)
 
 
 def test_person_far_away_ignored(monitor):
@@ -196,14 +210,16 @@ def test_fast_with_nobody_around_full_command(monitor):
     assert v == pytest.approx(FAST[0], abs=0.02)
 
 
-def test_person_one_metre_ahead_stops_only_a_fast_robot(monitor):
-    # Nearest edge of the person 1 m beyond the robot's front: past the 0.6 m
-    # zone of slow driving, inside what a robot at 1.3 m/s needs to stop.
+def test_someone_one_metre_ahead_brakes_a_fast_robot_only(monitor):
+    # Their nearest edge 1 m beyond the front. At 0.2 m/s that is 5 s away:
+    # nothing to do. Faster, the robot slows to keep 2 s between them, the
+    # same speed (1 m / 2 s) whatever it was asked for.
     front = profile.derive(profile.DEFAULT)['footprint'][0][0]
     person = [(front + 1.0 + 0.3, 0.0)]
     slow, _ = monitor.measure(people=person, command=(0.2, 0.0))
-    assert slow == pytest.approx(0.1, abs=0.01)    # only the people slowdown
+    assert slow == pytest.approx(0.2, abs=0.01)
+    keep = 1.0 / profile.PEOPLE_TIME_BEFORE_COLLISION
     medium, _ = monitor.measure(people=person, command=MEDIUM)
-    assert medium == pytest.approx(0.3, abs=0.01)
+    assert medium == pytest.approx(keep, abs=0.06)
     fast, _ = monitor.measure(people=person, command=FAST)
-    assert abs(fast) < 0.005
+    assert fast == pytest.approx(keep, abs=0.06)

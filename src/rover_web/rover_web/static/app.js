@@ -988,7 +988,7 @@ function renderPerception(s) {
 
   const bar = $('peopleBar');
   bar.classList.toggle('hidden', !s.people);
-  bar.textContent = s.people === 'wait' ? 'Qarşıda insan var — keçməsini gözləyir'
+  bar.textContent = s.people === 'wait' ? 'Qarşıda insan var — yol dəyişir'
     : 'İnsanlar yaxındır — yavaş gedir';
 
   const candJson = JSON.stringify(s.candidates);

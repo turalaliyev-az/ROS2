@@ -172,20 +172,6 @@ def generated(prof, tmp_path):
     return yaml.safe_load(target.read_text())
 
 
-def stop_zones(params):
-    """Get each band of the people stop zone: (name, linear_min, linear_max, x0, x1, half_w)."""
-    stop = params['collision_monitor']['ros__parameters']['PeopleStop']
-    assert stop['type'] == 'velocity_polygon' and stop['holonomic'] is False
-    zones = []
-    for name in stop['velocity_polygons']:
-        band = stop[name]
-        pts = yaml.safe_load(band['points'])
-        xs, ys = sorted({x for x, _ in pts}), sorted({y for _, y in pts})
-        zones.append((name, band['linear_min'], band['linear_max'], xs[0], xs[1], ys[1]))
-        assert band['theta_min'] <= -profile.MAX_TURN_RATE and band['theta_max'] >= 10.0
-    return zones
-
-
 def test_nav2_params_get_the_robots_shape(tmp_path):
     params = generated(profile.DEFAULT, tmp_path)
     d = profile.derive(profile.DEFAULT)
@@ -196,9 +182,22 @@ def test_nav2_params_get_the_robots_shape(tmp_path):
         assert p['inflation_layer']['inflation_radius'] == d['inflation_radius']
     monitor = params['collision_monitor']['ros__parameters']
     assert monitor['people']['topic'] == '/perception/people_cloud'
-    front, half_w = d['footprint'][0]
-    for _, _, _, x0, x1, hw in stop_zones(params):
-        assert x0 < front < x1 and hw == half_w
+    # Going round people: both costmaps carry them, with a clearing ring.
+    for costmap in ('local_costmap', 'global_costmap'):
+        p = params[costmap][costmap]['ros__parameters']
+        assert p['plugins'].index('people_layer') < p['plugins'].index('inflation_layer')
+        layer = p['people_layer']
+        assert layer['people']['topic'] == '/perception/people_obstacles'
+        assert layer['people']['marking'] and not layer['people']['clearing']
+        assert layer['people_clearing']['clearing'] and not layer['people_clearing']['marking']
+    # Near people a speed cap; ahead of them a trajectory-aware brake, no fixed stop box.
+    near, ahead = monitor['PeopleSlowdown'], monitor['PeopleApproach']
+    assert near['action_type'] == 'limit' and near['linear_limit'] == profile.PEOPLE_NEAR_SPEED
+    assert near['angular_limit'] == profile.MAX_TURN_RATE
+    assert ahead['action_type'] == 'approach'
+    assert ahead['time_before_collision'] == profile.PEOPLE_TIME_BEFORE_COLLISION
+    assert ahead['footprint_topic'] == '/local_costmap/published_footprint'
+    assert 'PeopleStop' not in monitor['polygons']
 
 
 def test_the_shipped_params_file_is_the_default_profile():
@@ -214,31 +213,16 @@ def test_default_top_speed_is_5_kmh():
     assert profile.DEFAULT['drive']['max_speed'] * 3.6 == pytest.approx(5.0, abs=0.01)
 
 
-def test_people_stop_zone_covers_every_command_and_grows_with_speed(tmp_path):
-    zones = stop_zones(generated(profile.DEFAULT, tmp_path))
-    # Reversing, turning in place and any forward speed fall in some band.
-    assert zones[0][1] <= -1.0 and zones[-1][2] >= 10.0
-    assert all(a[2] == b[1] for a, b in zip(zones, zones[1:]))
-    depths = [x1 - x0 for _, _, _, x0, x1, _ in zones]
-    assert depths == sorted(depths)
-    # Slow driving keeps the 0.6 m zone it always had.
-    front = profile.derive(profile.DEFAULT)['footprint'][0][0]
-    assert zones[0][4] == pytest.approx(front + profile.PEOPLE_STOP_DEPTH)
-    # At the top speed the robot can stop before the end of the zone.
-    top = profile.DEFAULT['drive']['max_speed']
-    assert zones[-1][4] - front >= profile.stopping_distance(top)
-
-
-def test_slow_robot_keeps_the_small_people_zone(tmp_path):
-    zones = stop_zones(generated(with_changes(drive={'max_speed': 0.3}), tmp_path))
-    assert len({x1 for _, _, _, _, x1, _ in zones}) == 1
+@pytest.mark.parametrize('speed', [0.3, 0.8, 1.39, 2.0])
+def test_people_brake_time_covers_reacting_and_braking(speed):
+    # Up to the highest max_speed a profile may have (LIMITS: 2 m/s).
+    assert profile.stopping_distance(speed) / speed <= profile.PEOPLE_TIME_BEFORE_COLLISION
 
 
 @pytest.mark.parametrize('speed', [0.08, 0.2, 0.3, 0.5])
 def test_low_speeds_keep_the_original_tuning(speed):
     assert profile.min_turn_radius(speed) == 0.5
     assert profile.approach_distance(speed) == 0.4
-    assert profile.people_stop_depth(speed) == profile.PEOPLE_STOP_DEPTH
 
 
 @pytest.mark.parametrize('speed', [0.6, 1.0, 1.39, 2.0])
